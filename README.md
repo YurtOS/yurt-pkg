@@ -65,6 +65,12 @@ summary     = "BusyBox userland tools for Yurt"
 license     = "GPL-2.0-only"
 depends     = []
 
+# Canonical Yurt ownership for the staged tree. Use 0 / 0 for system
+# tools and 1000 / 1000 for user-owned data. yurt-pack refuses to
+# silently default to either.
+default_uid = 0
+default_gid = 0
+
 [yurt]
 min_yurt_version = "0.1.0"
 commands         = ["busybox", "ash", "sh", "cat"]

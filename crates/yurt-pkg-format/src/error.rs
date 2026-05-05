@@ -47,6 +47,16 @@ pub enum Error {
     #[error("unsupported tar entry type for '{path}': {kind}")]
     UnsupportedEntry { path: String, kind: String },
 
+    #[error(
+        "metadata mismatch on '{path}': {field} manifest says {expected}, archive has {actual}"
+    )]
+    MetadataMismatch {
+        path: String,
+        field: &'static str,
+        expected: String,
+        actual: String,
+    },
+
     #[error("invalid manifest: {0}")]
     InvalidManifest(String),
 }

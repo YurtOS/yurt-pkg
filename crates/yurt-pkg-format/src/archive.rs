@@ -227,6 +227,36 @@ fn verify_files_against_entries(files: &FilesManifest, entries: &[ArchiveEntry])
                 actual: actual.as_str(),
             });
         }
+        // Cross-check ownership/mode so info/files.json can't disagree
+        // with the tar payload: an installer that uses the manifest as
+        // its uninstall record must trust those fields. The manifest's
+        // mode is the canonical 4-char octal string; the tar header's
+        // mode is u32 with non-permission bits we mask off.
+        if entry.uid != claimed.uid {
+            return Err(Error::MetadataMismatch {
+                path: entry.path.clone(),
+                field: "uid",
+                expected: claimed.uid.to_string(),
+                actual: entry.uid.to_string(),
+            });
+        }
+        if entry.gid != claimed.gid {
+            return Err(Error::MetadataMismatch {
+                path: entry.path.clone(),
+                field: "gid",
+                expected: claimed.gid.to_string(),
+                actual: entry.gid.to_string(),
+            });
+        }
+        let actual_mode = format!("{:04o}", entry.mode & 0o7777);
+        if actual_mode != claimed.mode {
+            return Err(Error::MetadataMismatch {
+                path: entry.path.clone(),
+                field: "mode",
+                expected: claimed.mode.clone(),
+                actual: actual_mode,
+            });
+        }
         match &entry.kind {
             EntryKind::File { content } => {
                 let expected_size = claimed.size.unwrap_or(0);
@@ -714,6 +744,67 @@ mod tests {
         let sum: u32 = header.iter().map(|&b| b as u32).sum();
         let s = format!("{:06o}\0 ", sum);
         header[148..156].copy_from_slice(s.as_bytes());
+    }
+
+    #[test]
+    fn read_detects_uid_mismatch() {
+        // Build a valid archive, then mutate files.json's uid so it
+        // disagrees with the tar header. Reader must reject — the
+        // manifest is the installer's uninstall record and must match
+        // the actual payload it'll restore from.
+        let mut w = Writer::new(sample_index(), None).unwrap();
+        w.add_file("bin/demo", b"hello".to_vec(), 0o755, 0, 0)
+            .unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        w.finish(&mut buf).unwrap();
+
+        let mutated = mutate_files_manifest(&buf, |files| {
+            files.files[0].uid = 1000;
+        });
+        let err = Reader::read(mutated.as_slice()).unwrap_err();
+        assert!(
+            matches!(&err, Error::MetadataMismatch { field: "uid", .. }),
+            "expected MetadataMismatch{{ field: 'uid' }}, got {:?}",
+            err,
+        );
+    }
+
+    #[test]
+    fn read_detects_gid_mismatch() {
+        let mut w = Writer::new(sample_index(), None).unwrap();
+        w.add_file("bin/demo", b"hello".to_vec(), 0o755, 0, 0)
+            .unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        w.finish(&mut buf).unwrap();
+
+        let mutated = mutate_files_manifest(&buf, |files| {
+            files.files[0].gid = 1000;
+        });
+        let err = Reader::read(mutated.as_slice()).unwrap_err();
+        assert!(
+            matches!(&err, Error::MetadataMismatch { field: "gid", .. }),
+            "expected MetadataMismatch{{ field: 'gid' }}, got {:?}",
+            err,
+        );
+    }
+
+    #[test]
+    fn read_detects_mode_mismatch() {
+        let mut w = Writer::new(sample_index(), None).unwrap();
+        w.add_file("bin/demo", b"hello".to_vec(), 0o755, 0, 0)
+            .unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        w.finish(&mut buf).unwrap();
+
+        let mutated = mutate_files_manifest(&buf, |files| {
+            files.files[0].mode = "0644".into();
+        });
+        let err = Reader::read(mutated.as_slice()).unwrap_err();
+        assert!(
+            matches!(&err, Error::MetadataMismatch { field: "mode", .. }),
+            "expected MetadataMismatch{{ field: 'mode' }}, got {:?}",
+            err,
+        );
     }
 
     #[test]
