@@ -55,16 +55,26 @@ mode   = 0o755
     .unwrap();
 
     let out = temp.path().join("out");
-    let status = Command::new(yurt_pack_bin())
+    let result = Command::new(yurt_pack_bin())
         .arg("build")
         .arg(&stage)
         .arg("--manifest")
         .arg(&manifest)
         .arg("--out")
         .arg(&out)
-        .status()
+        .output()
         .unwrap();
-    assert!(status.success(), "yurt-pack build exited with {status}");
+    assert!(
+        result.status.success(),
+        "yurt-pack build exited with {}",
+        result.status
+    );
+    // Canonical (0, 0) ownership: no non-canonical warning fires.
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        !stderr.contains("not a canonical"),
+        "canonical ownership should not produce the non-canonical warning, got: {stderr}"
+    );
 
     let artifact = out.join("demo-0.1.0-yurt_0.yurtpkg.tar.zst");
     assert!(artifact.exists(), "artifact not at {}", artifact.display());

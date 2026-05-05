@@ -29,7 +29,20 @@ pub fn is_canonical_ownership(uid: u32, gid: u32) -> bool {
 }
 
 /// Validate a package name. Pinned ASCII charset to keep names
-/// unambiguous across registries: `^[a-z0-9][a-z0-9._-]*$`.
+/// unambiguous across registries: `^[a-z0-9][a-z0-9._-]*$`. Public so
+/// registry tooling and `yurt-pack name --check`-style commands can
+/// reuse the same rule the format library enforces.
+pub fn validate_package_name(name: &str) -> Result<()> {
+    if !is_valid_package_name(name) {
+        return Err(Error::InvalidManifest(if name.is_empty() {
+            "package name must not be empty".into()
+        } else {
+            format!("invalid package name '{name}': must match ^[a-z0-9][a-z0-9._-]*$")
+        }));
+    }
+    Ok(())
+}
+
 fn is_valid_package_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -63,12 +76,7 @@ impl IndexManifest {
                 self.schema_version
             )));
         }
-        if !is_valid_package_name(&self.name) {
-            return Err(Error::InvalidManifest(format!(
-                "invalid package name '{}': must match ^[a-z0-9][a-z0-9._-]*$",
-                self.name
-            )));
-        }
+        validate_package_name(&self.name)?;
         if self.version.is_empty() {
             return Err(Error::InvalidManifest("version must not be empty".into()));
         }
@@ -143,7 +151,10 @@ pub struct FileEntry {
     /// Symlink/hardlink target. Required for symlinks and hardlinks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
-    /// Octal mode string, e.g. "0755".
+    /// Canonical 4-character zero-padded octal mode, e.g. `"0755"`,
+    /// `"0000"`, `"4755"`. Validated by `FileEntry::validate`; any
+    /// other encoding is rejected so different tools produce the same
+    /// bits for the same string.
     pub mode: String,
     pub uid: u32,
     pub gid: u32,
@@ -179,10 +190,12 @@ impl FileEntry {
         // Canonical mode encoding: 4-character zero-padded octal, e.g.
         // "0755", "0644", "0000". Reject anything that doesn't match so
         // every implementation that reads our archives produces the same
-        // bits for the same string.
-        if !is_canonical_mode_string(&self.mode) {
+        // bits for the same string. Split the diagnostic so a stale
+        // mode like "8755" doesn't get the unhelpful "wrong length"
+        // complaint.
+        if let Some(reason) = canonical_mode_string_error(&self.mode) {
             return Err(Error::InvalidManifest(format!(
-                "invalid mode '{}' on '{}': expected 4-character zero-padded octal (e.g. '0644')",
+                "invalid mode '{}' on '{}': {reason}",
                 self.mode, self.path
             )));
         }
@@ -216,17 +229,32 @@ impl FileEntry {
     }
 
     /// Mode bits parsed from the canonical 4-character octal string.
-    /// Returns 0 only if the entry was constructed with a non-canonical
-    /// mode and bypassed `validate()`; legitimate `mode 0` parses to 0.
-    pub fn mode_bits(&self) -> u32 {
-        u32::from_str_radix(&self.mode, 8).unwrap_or(0)
+    /// Returns an error if the string isn't canonical, so callers that
+    /// skipped `validate()` can't silently fall back to mode 0.
+    pub fn mode_bits(&self) -> Result<u32> {
+        if let Some(reason) = canonical_mode_string_error(&self.mode) {
+            return Err(Error::InvalidManifest(format!(
+                "cannot parse mode '{}' on '{}': {reason}",
+                self.mode, self.path
+            )));
+        }
+        Ok(u32::from_str_radix(&self.mode, 8).expect("validated above"))
     }
 }
 
-/// True iff `s` is the canonical 4-character zero-padded octal mode
-/// representation, e.g. `"0755"`, `"0000"`, `"4755"` (setuid).
-fn is_canonical_mode_string(s: &str) -> bool {
-    s.len() == 4 && s.bytes().all(|b| b.is_ascii_digit() && b < b'8')
+/// Return `Some(reason)` if `s` is not the canonical 4-character
+/// zero-padded octal mode representation. Splits the failure into
+/// actionable diagnostics: wrong length vs. non-octal digit.
+fn canonical_mode_string_error(s: &str) -> Option<&'static str> {
+    if s.len() != 4 {
+        return Some(
+            "expected exactly 4 characters of zero-padded octal (e.g. '0644', '0000', '4755')",
+        );
+    }
+    if !s.bytes().all(|b| b.is_ascii_digit() && b < b'8') {
+        return Some("each character must be an octal digit (0-7)");
+    }
+    None
 }
 
 impl FilesManifest {
@@ -439,7 +467,24 @@ mod tests {
             uid: 0,
             gid: 0,
         };
-        assert_eq!(e.mode_bits(), 0o755);
+        assert_eq!(e.mode_bits().unwrap(), 0o755);
+    }
+
+    #[test]
+    fn mode_bits_errors_on_non_canonical_input() {
+        // Callers who skipped validate() must surface a structured
+        // error instead of silently falling back to 0.
+        let e = FileEntry {
+            path: "bin/x".into(),
+            kind: FileEntryKind::File,
+            sha256: Some("00".repeat(32)),
+            size: Some(0),
+            target: None,
+            mode: "0o755".into(),
+            uid: 0,
+            gid: 0,
+        };
+        assert!(e.mode_bits().is_err());
     }
 
     #[test]
@@ -458,7 +503,7 @@ mod tests {
             gid: 0,
         };
         e.validate().unwrap();
-        assert_eq!(e.mode_bits(), 0);
+        assert_eq!(e.mode_bits().unwrap(), 0);
     }
 
     #[test]
@@ -476,7 +521,7 @@ mod tests {
             gid: 0,
         };
         e.validate().unwrap();
-        assert_eq!(e.mode_bits(), 0o4755);
+        assert_eq!(e.mode_bits().unwrap(), 0o4755);
     }
 
     #[test]
@@ -499,5 +544,47 @@ mod tests {
                 "expected '{bad}' to be rejected as non-canonical mode"
             );
         }
+    }
+
+    #[test]
+    fn mode_diagnostic_distinguishes_length_from_octal_digit() {
+        // Wrong-length and non-octal-digit are different mistakes;
+        // each should get a message that points the author at the fix.
+        let bad_length = FileEntry {
+            path: "bin/x".into(),
+            kind: FileEntryKind::File,
+            sha256: Some("00".repeat(32)),
+            size: Some(0),
+            target: None,
+            mode: "755".into(),
+            uid: 0,
+            gid: 0,
+        };
+        let err = bad_length.validate().unwrap_err();
+        assert!(
+            format!("{err}").contains("4 characters"),
+            "wrong-length error should mention the 4-character requirement, got: {err}"
+        );
+
+        let bad_digit = FileEntry {
+            mode: "8755".into(),
+            ..bad_length
+        };
+        let err = bad_digit.validate().unwrap_err();
+        assert!(
+            format!("{err}").contains("0-7"),
+            "non-octal-digit error should mention the 0-7 range, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_package_name_is_public_and_structured() {
+        // Public helper for registry tooling: same rule as
+        // IndexManifest::validate, but callable in isolation.
+        validate_package_name("busybox").unwrap();
+        let err = validate_package_name("").unwrap_err();
+        assert!(format!("{err}").contains("must not be empty"));
+        let err = validate_package_name("BadName").unwrap_err();
+        assert!(format!("{err}").contains("must match"));
     }
 }

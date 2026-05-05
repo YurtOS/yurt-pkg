@@ -805,6 +805,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn read_rejects_duplicate_info_files_manifest() {
+        // Symmetric with the index-manifest test: the same defense
+        // applies to info/files.json.
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let zstd = zstd::Encoder::new(&mut buf, 0).unwrap().auto_finish();
+            let mut tar = tar::Builder::new(zstd);
+            let idx_json = serde_json::to_vec(&sample_index()).unwrap();
+            let files_json = serde_json::to_vec(&FilesManifest { files: vec![] }).unwrap();
+            super::write_info(&mut tar, "info/index.json", &idx_json).unwrap();
+            super::write_info(&mut tar, "info/files.json", &files_json).unwrap();
+            super::write_info(&mut tar, "info/files.json", &files_json).unwrap();
+            tar.finish().unwrap();
+        }
+        let err = Reader::read(buf.as_slice()).unwrap_err();
+        assert!(
+            matches!(&err, Error::DuplicateEntry(p) if p == "info/files.json"),
+            "expected DuplicateEntry, got {:?}",
+            err,
+        );
+    }
+
+    #[test]
+    fn read_rejects_duplicate_info_yurt_manifest() {
+        // Same defense for the optional info/yurt.json.
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let zstd = zstd::Encoder::new(&mut buf, 0).unwrap().auto_finish();
+            let mut tar = tar::Builder::new(zstd);
+            let idx_json = serde_json::to_vec(&sample_index()).unwrap();
+            let files_json = serde_json::to_vec(&FilesManifest { files: vec![] }).unwrap();
+            let yurt_json = serde_json::to_vec(&sample_yurt()).unwrap();
+            super::write_info(&mut tar, "info/index.json", &idx_json).unwrap();
+            super::write_info(&mut tar, "info/files.json", &files_json).unwrap();
+            super::write_info(&mut tar, "info/yurt.json", &yurt_json).unwrap();
+            super::write_info(&mut tar, "info/yurt.json", &yurt_json).unwrap();
+            tar.finish().unwrap();
+        }
+        let err = Reader::read(buf.as_slice()).unwrap_err();
+        assert!(
+            matches!(&err, Error::DuplicateEntry(p) if p == "info/yurt.json"),
+            "expected DuplicateEntry, got {:?}",
+            err,
+        );
+    }
+
     /// Test helper: round-trip an archive while letting the caller mutate
     /// `info/files.json` on the way through.
     fn mutate_files_manifest(input: &[u8], mutate: impl FnOnce(&mut FilesManifest)) -> Vec<u8> {
