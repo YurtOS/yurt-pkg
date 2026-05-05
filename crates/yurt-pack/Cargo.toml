@@ -1,0 +1,23 @@
+[package]
+name = "yurt-pack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host CLI that builds .yurtpkg.tar.zst archives from a staged directory tree"
+
+[[bin]]
+name = "yurt-pack"
+path = "src/main.rs"
+
+[dependencies]
+yurt-pkg-format = { path = "../yurt-pkg-format" }
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+walkdir.workspace = true
+anyhow.workspace = true
+toml = "0.8"
+
+[dev-dependencies]
+tempfile.workspace = true
