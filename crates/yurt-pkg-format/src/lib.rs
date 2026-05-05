@@ -12,10 +12,10 @@ pub mod error;
 pub mod manifest;
 pub mod path;
 
-pub use archive::{ArchiveEntry, EntryKind, Reader, Writer};
+pub use archive::{sha256_hex, ArchiveEntry, EntryKind, Reader, Writer};
 pub use error::{Error, Result};
 pub use manifest::{
-    Depends, FileEntry, FileEntryKind, FilesManifest, IndexManifest, RuntimeRequirements,
-    YurtManifest, CANONICAL_ROOT_GID, CANONICAL_ROOT_UID, CANONICAL_USER_GID, CANONICAL_USER_UID,
-    SCHEMA_VERSION,
+    is_canonical_ownership, Depends, FileEntry, FileEntryKind, FilesManifest, IndexManifest,
+    RuntimeRequirements, YurtManifest, CANONICAL_ROOT_GID, CANONICAL_ROOT_UID, CANONICAL_USER_GID,
+    CANONICAL_USER_UID, SCHEMA_VERSION,
 };

@@ -87,19 +87,30 @@ impl Reader {
                 .to_string();
 
             // info/* manifests are read separately and not surfaced as entries.
+            // Each may appear at most once — a malicious archive that ships
+            // two `info/index.json` blocks must not silently take the second.
             if raw_path == "info/index.json" {
+                if index.is_some() {
+                    return Err(Error::DuplicateEntry(raw_path));
+                }
                 let mut buf = Vec::new();
                 entry.read_to_end(&mut buf)?;
                 index = Some(serde_json::from_slice(&buf)?);
                 continue;
             }
             if raw_path == "info/files.json" {
+                if files.is_some() {
+                    return Err(Error::DuplicateEntry(raw_path));
+                }
                 let mut buf = Vec::new();
                 entry.read_to_end(&mut buf)?;
                 files = Some(serde_json::from_slice(&buf)?);
                 continue;
             }
             if raw_path == "info/yurt.json" {
+                if yurt.is_some() {
+                    return Err(Error::DuplicateEntry(raw_path));
+                }
                 let mut buf = Vec::new();
                 entry.read_to_end(&mut buf)?;
                 yurt = Some(serde_json::from_slice(&buf)?);
@@ -113,8 +124,11 @@ impl Reader {
 
             let header = entry.header().clone();
             let mode = header.mode().unwrap_or(0);
-            let uid = header.uid().unwrap_or(0) as u32;
-            let gid = header.gid().unwrap_or(0) as u32;
+            // Tar uid/gid are u64 in the crate's API but our format
+            // models u32 (matching POSIX), so refuse rather than
+            // silently truncate values that won't round-trip.
+            let uid = u32_from_tar_u64(header.uid().unwrap_or(0), &path, "uid")?;
+            let gid = u32_from_tar_u64(header.gid().unwrap_or(0), &path, "gid")?;
 
             let kind = match header.entry_type() {
                 tar::EntryType::Regular => {
@@ -262,6 +276,16 @@ fn verify_files_against_entries(files: &FilesManifest, entries: &[ArchiveEntry])
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     hex::encode(digest)
+}
+
+/// Convert a tar header u64 uid/gid into our u32-modeled field, or
+/// reject the archive if the value would silently truncate.
+fn u32_from_tar_u64(v: u64, path: &str, field: &'static str) -> Result<u32> {
+    u32::try_from(v).map_err(|_| {
+        Error::InvalidManifest(format!(
+            "{field} {v} on '{path}' exceeds u32 (the package format models POSIX uid/gid)",
+        ))
+    })
 }
 
 /// Write a `.yurtpkg.tar.zst` archive.
@@ -610,7 +634,14 @@ mod tests {
         // build a clean archive with a benign name and then patch the
         // entry's name in the decompressed tar bytes to a traversal path.
         // This is what a malicious archive produced by a non-validating
-        // tool would look like, and Reader::read must still reject it.
+        // tool (or a hand-crafted attack) would look like, and
+        // Reader::read must still reject it.
+        //
+        // The hardcoded byte offsets below (124 for size, 148 for the
+        // checksum field) are the POSIX/GNU tar layout. They've been
+        // stable for decades; if the tar crate ever switches default
+        // formats this test needs to follow, but the rejection path it
+        // exercises is what matters.
         let mut w = Writer::new(sample_index(), None).unwrap();
         w.add_file("escape", b"".to_vec(), 0o644, 0, 0).unwrap();
         let mut zst: Vec<u8> = Vec::new();
@@ -700,6 +731,78 @@ mod tests {
         });
         let err = Reader::read(mutated.as_slice()).unwrap_err();
         assert!(matches!(err, Error::HashMismatch { .. }));
+    }
+
+    #[test]
+    fn duplicate_archive_path_after_normalization_rejected() {
+        // "bin/demo" and "./bin/demo" both normalize to "bin/demo". The
+        // spec says: "Reject duplicate archive entries after path
+        // normalization." Verify that the writer's normalize-and-track
+        // catches this even when the input strings differ.
+        let mut w = Writer::new(sample_index(), None).unwrap();
+        w.add_file("bin/demo", b"a".to_vec(), 0o755, 0, 0).unwrap();
+        let err = w
+            .add_file("./bin/demo", b"b".to_vec(), 0o755, 0, 0)
+            .unwrap_err();
+        assert!(matches!(err, Error::DuplicateEntry(_)));
+    }
+
+    #[test]
+    fn round_trip_preserves_non_zero_uid_gid() {
+        // Every other test uses (0, 0); the format also supports the
+        // canonical user (1000, 1000) and any arbitrary u32. Verify the
+        // tar header ←→ FileEntry path keeps the values intact.
+        let mut w = Writer::new(sample_index(), None).unwrap();
+        w.add_file("home/user/file.txt", b"hi".to_vec(), 0o644, 1000, 1000)
+            .unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        w.finish(&mut buf).unwrap();
+
+        let r = Reader::read(buf.as_slice()).unwrap();
+        let e = &r.entries[0];
+        assert_eq!(e.uid, 1000);
+        assert_eq!(e.gid, 1000);
+        assert_eq!(r.files.files[0].uid, 1000);
+        assert_eq!(r.files.files[0].gid, 1000);
+    }
+
+    #[test]
+    fn read_rejects_missing_files_manifest() {
+        // Build an archive with info/index.json present but
+        // info/files.json missing. Reader must surface the second
+        // missing-manifest error, distinct from the index-missing case.
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let zstd = zstd::Encoder::new(&mut buf, 0).unwrap().auto_finish();
+            let mut tar = tar::Builder::new(zstd);
+            let idx_json = serde_json::to_vec(&sample_index()).unwrap();
+            super::write_info(&mut tar, "info/index.json", &idx_json).unwrap();
+            tar.finish().unwrap();
+        }
+        let err = Reader::read(buf.as_slice()).unwrap_err();
+        assert!(matches!(err, Error::MissingManifest("info/files.json")));
+    }
+
+    #[test]
+    fn read_rejects_duplicate_info_index_manifest() {
+        // A malicious archive ships two `info/index.json` blocks. The
+        // first parse must stick and the second must error rather than
+        // silently overwrite.
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let zstd = zstd::Encoder::new(&mut buf, 0).unwrap().auto_finish();
+            let mut tar = tar::Builder::new(zstd);
+            let idx_json = serde_json::to_vec(&sample_index()).unwrap();
+            super::write_info(&mut tar, "info/index.json", &idx_json).unwrap();
+            super::write_info(&mut tar, "info/index.json", &idx_json).unwrap();
+            tar.finish().unwrap();
+        }
+        let err = Reader::read(buf.as_slice()).unwrap_err();
+        assert!(
+            matches!(&err, Error::DuplicateEntry(p) if p == "info/index.json"),
+            "expected DuplicateEntry, got {:?}",
+            err,
+        );
     }
 
     /// Test helper: round-trip an archive while letting the caller mutate

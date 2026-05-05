@@ -22,7 +22,8 @@ use clap::{Parser, Subcommand};
 use walkdir::WalkDir;
 
 use yurt_pkg_format::{
-    Depends, IndexManifest, RuntimeRequirements, Writer, YurtManifest, SCHEMA_VERSION,
+    is_canonical_ownership, Depends, IndexManifest, RuntimeRequirements, Writer, YurtManifest,
+    CANONICAL_ROOT_UID, CANONICAL_USER_UID, SCHEMA_VERSION,
 };
 
 mod manifest_toml;
@@ -108,10 +109,24 @@ fn build(source: &Path, manifest_path: &Path, out: &Path) -> anyhow::Result<()> 
         entries.push((rel, entry));
     }
 
-    let (uid, gid) = (
-        manifest.default_uid.unwrap_or(0),
-        manifest.default_gid.unwrap_or(0),
-    );
+    // The package format only models two canonical users today (0:0 root,
+    // 1000:1000 user). Authors must declare which one applies to the
+    // staged tree rather than getting silent root-ownership by default.
+    let uid = manifest.default_uid.ok_or_else(|| {
+        anyhow!(
+            "manifest must set default_uid (use {CANONICAL_ROOT_UID} for system tools \
+             or {CANONICAL_USER_UID} for user-owned data)"
+        )
+    })?;
+    let gid = manifest
+        .default_gid
+        .ok_or_else(|| anyhow!("manifest must set default_gid (typically equal to default_uid)"))?;
+    if !is_canonical_ownership(uid, gid) {
+        eprintln!(
+            "warning: ({uid}, {gid}) is not a canonical Yurt ownership tuple. \
+             The kernel only models 0:0 (root) and 1000:1000 (user) today."
+        );
+    }
 
     for (rel, entry) in &entries {
         let rel_str = rel
@@ -122,11 +137,17 @@ fn build(source: &Path, manifest_path: &Path, out: &Path) -> anyhow::Result<()> 
 
         let file_type = metadata.file_type();
         if file_type.is_symlink() {
-            let target = fs::read_link(entry.path())
-                .with_context(|| format!("reading symlink {}", entry.path().display()))?
-                .to_string_lossy()
-                .into_owned();
-            writer.add_symlink(rel_str, &target, mode, uid, gid)?;
+            let target_path = fs::read_link(entry.path())
+                .with_context(|| format!("reading symlink {}", entry.path().display()))?;
+            // The package format is UTF-8; refuse to silently mangle a
+            // non-UTF-8 symlink target with U+FFFD replacement chars.
+            let target = target_path.to_str().ok_or_else(|| {
+                anyhow!(
+                    "symlink {} target is not valid UTF-8 (the .yurtpkg format is UTF-8 only)",
+                    entry.path().display()
+                )
+            })?;
+            writer.add_symlink(rel_str, target, mode, uid, gid)?;
         } else if file_type.is_dir() {
             writer.add_dir(rel_str, mode, uid, gid)?;
         } else if file_type.is_file() {

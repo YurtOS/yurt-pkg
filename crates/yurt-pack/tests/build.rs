@@ -36,6 +36,8 @@ platform    = "wasm32-wasip1-yurt"
 summary     = "Demo package"
 license     = "Apache-2.0"
 depends     = []
+default_uid = 0
+default_gid = 0
 
 [yurt]
 min_yurt_version = "0.1.0"
@@ -90,6 +92,84 @@ mode   = 0o755
 }
 
 #[test]
+fn rejects_manifest_without_default_uid() {
+    let temp = tempfile::tempdir().unwrap();
+    let stage = temp.path().join("stage");
+    fs::create_dir_all(stage.join("bin")).unwrap();
+    fs::write(stage.join("bin/demo"), b"x").unwrap();
+
+    let manifest = temp.path().join("yurt-pack.toml");
+    fs::write(
+        &manifest,
+        r#"
+name        = "demo"
+version     = "0.1.0"
+build       = "yurt_0"
+platform    = "wasm32-wasip1-yurt"
+summary     = "Demo"
+license     = "Apache-2.0"
+"#,
+    )
+    .unwrap();
+
+    let result = Command::new(yurt_pack_bin())
+        .arg("build")
+        .arg(&stage)
+        .arg("--manifest")
+        .arg(&manifest)
+        .arg("--out")
+        .arg(temp.path().join("out"))
+        .output()
+        .unwrap();
+    assert!(
+        !result.status.success(),
+        "should have refused to assume an ownership default"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("default_uid"), "stderr was: {stderr}");
+}
+
+#[test]
+fn warns_on_non_canonical_ownership() {
+    let temp = tempfile::tempdir().unwrap();
+    let stage = temp.path().join("stage");
+    fs::create_dir_all(stage.join("bin")).unwrap();
+    fs::write(stage.join("bin/demo"), b"x").unwrap();
+
+    let manifest = temp.path().join("yurt-pack.toml");
+    fs::write(
+        &manifest,
+        r#"
+name        = "demo"
+version     = "0.1.0"
+build       = "yurt_0"
+platform    = "wasm32-wasip1-yurt"
+summary     = "Demo"
+license     = "Apache-2.0"
+default_uid = 500
+default_gid = 500
+"#,
+    )
+    .unwrap();
+
+    let result = Command::new(yurt_pack_bin())
+        .arg("build")
+        .arg(&stage)
+        .arg("--manifest")
+        .arg(&manifest)
+        .arg("--out")
+        .arg(temp.path().join("out"))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "non-canonical ownership should warn, not fail"
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("not a canonical"), "stderr was: {stderr}");
+}
+
+#[test]
 fn rejects_traversal_in_hardlink_target() {
     let temp = tempfile::tempdir().unwrap();
     let stage = temp.path().join("stage");
@@ -106,6 +186,8 @@ build       = "yurt_0"
 platform    = "wasm32-wasip1-yurt"
 summary     = "Demo"
 license     = "Apache-2.0"
+default_uid = 0
+default_gid = 0
 
 [[hardlinks]]
 path   = "bin/escape"

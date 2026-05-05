@@ -20,6 +20,27 @@ pub const CANONICAL_ROOT_GID: u32 = 0;
 pub const CANONICAL_USER_UID: u32 = 1000;
 pub const CANONICAL_USER_GID: u32 = 1000;
 
+/// Whether `(uid, gid)` is one of the two canonical Yurt ownership tuples.
+/// Tools that build packages should warn (or refuse) on non-canonical
+/// values, since the kernel only models these two users today.
+pub fn is_canonical_ownership(uid: u32, gid: u32) -> bool {
+    (uid == CANONICAL_ROOT_UID && gid == CANONICAL_ROOT_GID)
+        || (uid == CANONICAL_USER_UID && gid == CANONICAL_USER_GID)
+}
+
+/// Validate a package name. Pinned ASCII charset to keep names
+/// unambiguous across registries: `^[a-z0-9][a-z0-9._-]*$`.
+fn is_valid_package_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-')
+}
+
 /// `info/index.json` — required, describes package identity.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IndexManifest {
@@ -42,12 +63,9 @@ impl IndexManifest {
                 self.schema_version
             )));
         }
-        if self.name.is_empty() {
-            return Err(Error::InvalidManifest("name must not be empty".into()));
-        }
-        if self.name.to_lowercase() != self.name {
+        if !is_valid_package_name(&self.name) {
             return Err(Error::InvalidManifest(format!(
-                "name must be lowercase: {}",
+                "invalid package name '{}': must match ^[a-z0-9][a-z0-9._-]*$",
                 self.name
             )));
         }
@@ -158,10 +176,16 @@ impl FileEntry {
                 "file entry path must not be empty".into(),
             ));
         }
-        // Mode parses as octal (the spec writes them as "0755" strings).
-        u32::from_str_radix(self.mode.trim_start_matches('0'), 8).map_err(|_| {
-            Error::InvalidManifest(format!("invalid mode '{}' on '{}'", self.mode, self.path))
-        })?;
+        // Canonical mode encoding: 4-character zero-padded octal, e.g.
+        // "0755", "0644", "0000". Reject anything that doesn't match so
+        // every implementation that reads our archives produces the same
+        // bits for the same string.
+        if !is_canonical_mode_string(&self.mode) {
+            return Err(Error::InvalidManifest(format!(
+                "invalid mode '{}' on '{}': expected 4-character zero-padded octal (e.g. '0644')",
+                self.mode, self.path
+            )));
+        }
         match self.kind {
             FileEntryKind::File => {
                 if self.sha256.is_none() {
@@ -191,10 +215,18 @@ impl FileEntry {
         Ok(())
     }
 
-    /// Mode bits parsed from the octal string representation.
+    /// Mode bits parsed from the canonical 4-character octal string.
+    /// Returns 0 only if the entry was constructed with a non-canonical
+    /// mode and bypassed `validate()`; legitimate `mode 0` parses to 0.
     pub fn mode_bits(&self) -> u32 {
-        u32::from_str_radix(self.mode.trim_start_matches('0'), 8).unwrap_or(0)
+        u32::from_str_radix(&self.mode, 8).unwrap_or(0)
     }
+}
+
+/// True iff `s` is the canonical 4-character zero-padded octal mode
+/// representation, e.g. `"0755"`, `"0000"`, `"4755"` (setuid).
+fn is_canonical_mode_string(s: &str) -> bool {
+    s.len() == 4 && s.bytes().all(|b| b.is_ascii_digit() && b < b'8')
 }
 
 impl FilesManifest {
@@ -271,6 +303,43 @@ mod tests {
         let mut m = good_index();
         m.name = "BusyBox".into();
         assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn index_rejects_unicode_lowercase_lookalikes() {
+        // 'σ' lowercases to itself but is not in our ASCII charset.
+        let mut m = good_index();
+        m.name = "σysadmin".into();
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn index_rejects_leading_punctuation_in_name() {
+        let mut m = good_index();
+        m.name = "-foo".into();
+        assert!(m.validate().is_err());
+        m.name = ".foo".into();
+        assert!(m.validate().is_err());
+    }
+
+    #[test]
+    fn index_accepts_valid_name_charset() {
+        let mut m = good_index();
+        for name in [
+            "foo", "foo-bar", "foo.bar", "foo_bar", "0", "lib_z3", "py3.11",
+        ] {
+            m.name = name.into();
+            m.validate()
+                .unwrap_or_else(|e| panic!("rejected valid name '{name}': {e}"));
+        }
+    }
+
+    #[test]
+    fn is_canonical_ownership_matches_spec() {
+        assert!(is_canonical_ownership(0, 0));
+        assert!(is_canonical_ownership(1000, 1000));
+        assert!(!is_canonical_ownership(1000, 0));
+        assert!(!is_canonical_ownership(500, 500));
     }
 
     #[test]
@@ -371,5 +440,64 @@ mod tests {
             gid: 0,
         };
         assert_eq!(e.mode_bits(), 0o755);
+    }
+
+    #[test]
+    fn mode_zero_round_trips() {
+        // Regression: previously `trim_start_matches('0')` on "0000" left
+        // an empty string, which `from_str_radix` rejected. mode 0 is
+        // legal (chmod 0 produces it) and must validate + parse to 0.
+        let e = FileEntry {
+            path: "bin/empty".into(),
+            kind: FileEntryKind::File,
+            sha256: Some("00".repeat(32)),
+            size: Some(0),
+            target: None,
+            mode: "0000".into(),
+            uid: 0,
+            gid: 0,
+        };
+        e.validate().unwrap();
+        assert_eq!(e.mode_bits(), 0);
+    }
+
+    #[test]
+    fn mode_setuid_round_trips() {
+        // 4755 = setuid + 0755. The canonical-mode check must allow the
+        // top-bit forms tar entries can carry.
+        let e = FileEntry {
+            path: "bin/su".into(),
+            kind: FileEntryKind::File,
+            sha256: Some("ab".repeat(32)),
+            size: Some(1),
+            target: None,
+            mode: "4755".into(),
+            uid: 0,
+            gid: 0,
+        };
+        e.validate().unwrap();
+        assert_eq!(e.mode_bits(), 0o4755);
+    }
+
+    #[test]
+    fn mode_rejects_non_canonical_encodings() {
+        // Each non-canonical form must fail validation: too short,
+        // missing leading zero, hex digits, or octal-out-of-range.
+        for bad in ["755", "0", "00755", "0o644", "0xff", "0648"] {
+            let e = FileEntry {
+                path: "bin/x".into(),
+                kind: FileEntryKind::File,
+                sha256: Some("00".repeat(32)),
+                size: Some(0),
+                target: None,
+                mode: bad.into(),
+                uid: 0,
+                gid: 0,
+            };
+            assert!(
+                e.validate().is_err(),
+                "expected '{bad}' to be rejected as non-canonical mode"
+            );
+        }
     }
 }
