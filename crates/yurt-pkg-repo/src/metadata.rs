@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 use url::Url;
-use yurt_pkg_format::{validate_package_name, Depends};
+use yurt_pkg_format::{validate_package_name, validate_sha256_hex, Depends};
 use yurt_pkg_trust::SigningIdentity;
 
 #[derive(Debug, Error)]
@@ -24,6 +24,8 @@ pub enum Error {
     InvalidPackageName(String),
     #[error("invalid package entry url for '{0}': {1}")]
     InvalidUrl(String, url::ParseError),
+    #[error("invalid package entry relative url for '{package}': {url}")]
+    InvalidPackageRelativeUrl { package: String, url: String },
     #[error("invalid sha256 for '{0}'")]
     InvalidSha256(String),
     #[error("package file name '{file_name}' does not match entry name '{version_name}'")]
@@ -84,6 +86,9 @@ impl Index {
                 expires_at: self.expires_at,
             });
         }
+        // `serde_json` keeps the last duplicate object key before we
+        // see this map; repository CI must emit canonical JSON so
+        // duplicate package entries never reach clients.
         for (name, package) in &self.packages {
             validate_package_name(name).map_err(|_| Error::InvalidPackageName(name.clone()))?;
             package.validate(name)?;
@@ -102,11 +107,34 @@ pub struct RepoPackage {
 impl RepoPackage {
     fn validate(&self, name: &str) -> Result<()> {
         validate_sha256(name, &self.sha256)?;
-        if !self.url.starts_with("packages/") {
+        if self.url.starts_with("packages/") {
+            validate_package_relative_url(name, &self.url)?;
+        } else {
             Url::parse(&self.url).map_err(|err| Error::InvalidUrl(name.to_string(), err))?;
         }
         Ok(())
     }
+}
+
+fn validate_package_relative_url(name: &str, url: &str) -> Result<()> {
+    let Some(file_name) = url.strip_prefix("packages/") else {
+        return Err(Error::InvalidPackageRelativeUrl {
+            package: name.to_string(),
+            url: url.to_string(),
+        });
+    };
+    if file_name.is_empty()
+        || file_name.contains('/')
+        || file_name == "."
+        || file_name == ".."
+        || !file_name.ends_with(".json")
+    {
+        return Err(Error::InvalidPackageRelativeUrl {
+            package: name.to_string(),
+            url: url.to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -120,15 +148,13 @@ impl PackageFile {
         validate_package_name(&self.name)
             .map_err(|_| Error::InvalidPackageName(self.name.clone()))?;
         for version in &self.versions {
-            if version
-                .name
-                .as_deref()
-                .is_some_and(|name| name != self.name)
-            {
-                return Err(Error::NameMismatch {
-                    file_name: self.name.clone(),
-                    version_name: version.name.clone().unwrap(),
-                });
+            if let Some(version_name) = &version.name {
+                if version_name != &self.name {
+                    return Err(Error::NameMismatch {
+                        file_name: self.name.clone(),
+                        version_name: version_name.clone(),
+                    });
+                }
             }
             version.validate(&self.name)?;
         }
@@ -172,9 +198,5 @@ impl PackageVersion {
 }
 
 fn validate_sha256(name: &str, value: &str) -> Result<()> {
-    if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Ok(())
-    } else {
-        Err(Error::InvalidSha256(name.to_string()))
-    }
+    validate_sha256_hex(name, value).map_err(|_| Error::InvalidSha256(name.to_string()))
 }

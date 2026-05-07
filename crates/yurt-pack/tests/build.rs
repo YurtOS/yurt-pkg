@@ -110,6 +110,95 @@ mode   = 0o755
 }
 
 #[test]
+fn accepts_legacy_empty_depends_array() {
+    let temp = tempfile::tempdir().unwrap();
+    let stage = temp.path().join("stage");
+    fs::create_dir_all(stage.join("bin")).unwrap();
+    fs::write(stage.join("bin/demo"), b"x").unwrap();
+
+    let manifest = temp.path().join("yurt-pack.toml");
+    fs::write(
+        &manifest,
+        r#"
+name        = "demo"
+version     = "0.1.0"
+build       = "yurt_0"
+platform    = "wasm32-wasip1-yurt"
+summary     = "Demo"
+license     = "Apache-2.0"
+default_uid = 0
+default_gid = 0
+depends     = []
+"#,
+    )
+    .unwrap();
+
+    let out = temp.path().join("out");
+    let result = Command::new(yurt_pack_bin())
+        .arg("build")
+        .arg(&stage)
+        .arg("--manifest")
+        .arg(&manifest)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "legacy empty depends array should still build: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+#[test]
+fn accepts_legacy_string_depends_array() {
+    let temp = tempfile::tempdir().unwrap();
+    let stage = temp.path().join("stage");
+    fs::create_dir_all(stage.join("bin")).unwrap();
+    fs::write(stage.join("bin/demo"), b"x").unwrap();
+
+    let manifest = temp.path().join("yurt-pack.toml");
+    fs::write(
+        &manifest,
+        r#"
+name        = "demo"
+version     = "0.1.0"
+build       = "yurt_0"
+platform    = "wasm32-wasip1-yurt"
+summary     = "Demo"
+license     = "Apache-2.0"
+default_uid = 0
+default_gid = 0
+depends     = ["libfoo ^1.2"]
+"#,
+    )
+    .unwrap();
+
+    let out = temp.path().join("out");
+    let result = Command::new(yurt_pack_bin())
+        .arg("build")
+        .arg(&stage)
+        .arg("--manifest")
+        .arg(&manifest)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "legacy string depends array should still build: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let artifact = out.join("demo-0.1.0-yurt_0.yurtpkg");
+    let f = fs::File::open(&artifact).unwrap();
+    let r = Reader::read(f).unwrap();
+    assert_eq!(r.index.depends.len(), 1);
+    assert_eq!(r.index.depends[0].name, "libfoo");
+    assert_eq!(r.index.depends[0].req, "^1.2");
+}
+
+#[test]
 fn rejects_manifest_without_default_uid() {
     let temp = tempfile::tempdir().unwrap();
     let stage = temp.path().join("stage");

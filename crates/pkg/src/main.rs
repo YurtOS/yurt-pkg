@@ -46,15 +46,27 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        // TODO(docs/superpowers/specs/2026-05-07-yurt-pkg-update-flow-design.md):
+        // implement signed index fetch, freshness, rollback, and cache persistence.
         Command::Update => bail!("pkg update is deferred to the update-flow spec"),
+        // TODO(docs/superpowers/specs/2026-05-07-yurt-pkg-update-flow-design.md):
+        // implement db.sqlite-backed repository cache queries.
         Command::Search { .. } | Command::Info { .. } => {
             bail!("pkg search/info require db.sqlite cache implementation")
         }
+        // TODO(docs/superpowers/specs/2026-05-07-yurt-pkg-resolver-installer-design.md):
+        // implement dependency resolution, install planning, and atomic state updates.
         Command::Install { .. } | Command::Upgrade { .. } => {
             bail!("install and upgrade planning are deferred to the resolver/installer spec")
         }
+        // TODO(docs/superpowers/specs/2026-05-07-yurt-pkg-resolver-installer-design.md):
+        // implement installed-state mutation semantics.
         Command::Remove { .. } => bail!("remove is deferred to the resolver/installer spec"),
+        // TODO(docs/superpowers/specs/2026-05-07-yurt-pkg-resolver-installer-design.md):
+        // implement installed.sqlite reads.
         Command::List { .. } => bail!("list requires installed.sqlite implementation"),
+        // TODO(docs/superpowers/specs/2026-05-07-yurt-pkg-update-flow-design.md):
+        // implement trusted repo persistence and repo:write capability checks.
         Command::AddRepo { .. } => bail!("add-repo requires repo:write capability integration"),
     }
 }

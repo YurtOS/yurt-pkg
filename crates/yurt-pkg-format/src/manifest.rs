@@ -48,6 +48,17 @@ pub fn validate_package_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a SHA-256 digest encoded as 64 hexadecimal ASCII characters.
+pub fn validate_sha256_hex(label: &str, value: &str) -> Result<()> {
+    if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(Error::InvalidManifest(format!(
+            "invalid sha256 for '{label}'"
+        )))
+    }
+}
+
 fn is_valid_package_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -120,10 +131,6 @@ impl Depends {
             ))
         })?;
         Ok(())
-    }
-
-    pub fn name(&self) -> &str {
-        self.name.as_str()
     }
 }
 
@@ -377,20 +384,6 @@ mod tests {
     }
 
     #[test]
-    fn depends_extracts_name() {
-        let d = Depends {
-            name: "libz".into(),
-            req: ">=1.3,<2".into(),
-        };
-        assert_eq!(d.name(), "libz");
-        let d2 = Depends {
-            name: "busybox".into(),
-            req: "*".into(),
-        };
-        assert_eq!(d2.name(), "busybox");
-    }
-
-    #[test]
     fn dependency_requires_valid_name_and_semver_req() {
         let dep = Depends {
             name: "libfoo".to_string(),
@@ -617,5 +610,13 @@ mod tests {
         assert!(format!("{err}").contains("must not be empty"));
         let err = validate_package_name("BadName").unwrap_err();
         assert!(format!("{err}").contains("must match"));
+    }
+
+    #[test]
+    fn validate_sha256_hex_is_public_and_structured() {
+        validate_sha256_hex("archive", &"ab".repeat(32)).unwrap();
+        let err = validate_sha256_hex("archive", "abc").unwrap_err();
+        assert!(format!("{err}").contains("invalid sha256"));
+        assert!(format!("{err}").contains("archive"));
     }
 }

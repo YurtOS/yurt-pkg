@@ -41,7 +41,7 @@ fn package_diff_returns_new_changed_and_removed_names() {
 
 #[test]
 fn selection_prefers_lowest_priority_then_repo_id() {
-    let candidates = vec![
+    let candidates = [
         Candidate {
             repo_id: "z".to_string(),
             priority: 10,

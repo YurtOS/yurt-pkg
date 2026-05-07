@@ -12,7 +12,7 @@ Everything else — manifests, dependency constraints, registry indexes, the
 A package is a zstd-compressed tar archive named:
 
 ```
-<name>-<version>-<build>.yurtpkg.tar.zst
+<name>-<version>-<build>.yurtpkg
 ```
 
 with this layout:
@@ -34,7 +34,7 @@ The full normative design lives in
 
 ## Crates
 
-- `yurt-pkg-format` — read, validate, and write `.yurtpkg.tar.zst` archives.
+- `yurt-pkg-format` — read, validate, and write `.yurtpkg` archives.
   Pure library; no fs side effects beyond the I/O the caller hands it.
 - `yurt-pack` — host CLI that builds a package archive from a source tree
   and a manifest file.
@@ -63,13 +63,15 @@ build       = "yurt_0"
 platform    = "wasm32-wasip1-yurt"
 summary     = "BusyBox userland tools for Yurt"
 license     = "GPL-2.0-only"
-depends     = []
 
 # Canonical Yurt ownership for the staged tree. Use 0 / 0 for system
 # tools and 1000 / 1000 for user-owned data. yurt-pack refuses to
 # silently default to either.
 default_uid = 0
 default_gid = 0
+
+[depends]
+libc = "^0.1"
 
 [yurt]
 min_yurt_version = "0.1.0"

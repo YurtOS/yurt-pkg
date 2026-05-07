@@ -36,6 +36,62 @@ fn index_rejects_rollback_and_expired_metadata() {
 }
 
 #[test]
+fn index_accepts_package_json_relative_urls() {
+    let json = r#"{
+      "schema": 1,
+      "index_version": 10,
+      "generated_at": "2026-05-07T12:00:00Z",
+      "expires_at": "2026-05-14T12:00:00Z",
+      "packages": {
+        "foo": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 123, "url": "packages/foo.json"}
+      }
+    }"#;
+    let index: Index = serde_json::from_str(json).unwrap();
+    let now = OffsetDateTime::parse(
+        "2026-05-08T00:00:00Z",
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    index
+        .validate_against(None, now, Freshness::default())
+        .unwrap();
+}
+
+#[test]
+fn index_rejects_package_relative_urls_outside_packages_json_layout() {
+    for url in [
+        "/packages/foo.json",
+        "packages/../foo.json",
+        "packages/foo.txt",
+        "packages/foo/bar.json",
+    ] {
+        let json = format!(
+            r#"{{
+              "schema": 1,
+              "index_version": 10,
+              "generated_at": "2026-05-07T12:00:00Z",
+              "expires_at": "2026-05-14T12:00:00Z",
+              "packages": {{
+                "foo": {{"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 123, "url": "{url}"}}
+              }}
+            }}"#
+        );
+        let index: Index = serde_json::from_str(&json).unwrap();
+        let now = OffsetDateTime::parse(
+            "2026-05-08T00:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        assert!(
+            index
+                .validate_against(None, now, Freshness::default())
+                .is_err(),
+            "expected {url} to be rejected"
+        );
+    }
+}
+
+#[test]
 fn package_file_validates_signing_and_dependencies() {
     let json = r#"{
       "name": "foo",

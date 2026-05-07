@@ -84,12 +84,7 @@ fn lint_continuity(
     let recipe: Recipe = toml::from_str(&recipe_text).context("parsing recipe TOML")?;
     let latest = package
         .versions
-        .iter()
-        .max_by(|left, right| {
-            semver::Version::parse(&left.version)
-                .unwrap()
-                .cmp(&semver::Version::parse(&right.version).unwrap())
-        })
+        .last()
         .context("package file has no versions")?;
 
     if latest.signing.subject != recipe.package.signing.subject

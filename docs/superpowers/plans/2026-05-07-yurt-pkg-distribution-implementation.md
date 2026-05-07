@@ -14,6 +14,8 @@
 
 This spec spans five subsystems: package format migration, trust policy, repository metadata/cache, in-sandbox `pkg`, and repository publishing CI. Implement them in this order. Do not start resolver internals, install hooks, file ownership conflict handling, or true revocation lists in this plan; the spec explicitly defers them.
 
+This master plan is retained as the audit trail for the initial vertical slice. Follow-up implementation plans should be split by subsystem so review scope stays bounded.
+
 The only resolver-related behavior in this plan is metadata shape and command scaffolding. `pkg install` and `pkg upgrade` should parse arguments and return a clear "planner not implemented in this slice" error until the resolver/installer spec exists.
 
 Executable `pkg update` is also deferred to a follow-up update-flow plan. This plan builds the metadata, freshness, rollback, trust-root, and verifier boundaries that `pkg update` needs, but it does not implement HTTP fetching, 304 handling, `meta.json` persistence, `db.sqlite`, or package-file cache writes.
