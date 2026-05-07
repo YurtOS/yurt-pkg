@@ -2,6 +2,7 @@
 members = [
   "crates/yurt-pkg-format",
   "crates/yurt-pack",
+  "crates/yurt-pkg-trust",
 ]
 resolver = "2"
 
