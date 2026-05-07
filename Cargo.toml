@@ -4,6 +4,7 @@ members = [
   "crates/yurt-pack",
   "crates/yurt-pkg-trust",
   "crates/yurt-pkg-repo",
+  "crates/pkg",
 ]
 resolver = "2"
 
