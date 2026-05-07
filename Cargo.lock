@@ -1353,6 +1353,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "yurt-repo-ci"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "predicates",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "yurt-pkg-format",
+ "yurt-pkg-repo",
+ "yurt-pkg-trust",
+]
+
+[[package]]
 name = "zerofrom"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
