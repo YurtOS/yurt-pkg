@@ -7,13 +7,19 @@ to apply a prevalidated tar payload to its VFS for boot fixtures and tests.
 Everything else — manifests, dependency constraints, registry indexes, the
 `pkg install` command — lives here.
 
+## Documentation
+
+- [Package format](docs/package-format.md) - archive naming, manifest layout,
+  canonical ownership, and validation rules.
+- [`pkg` command](docs/pkg.md) - in-sandbox package manager surface and the
+  parts intentionally deferred after this foundation PR.
+- [Building packages](docs/building-packages.md) - how `yurt-cc`,
+  `cargo-yurt`, and `yurt-pack` fit together.
+
 ## Format
 
-A package is a zstd-compressed tar archive named:
-
-```
-<name>-<version>-<build>.yurtpkg
-```
+A package is a zstd-compressed tar archive named
+`<name>-<version>-<build>.yurtpkg`.
 
 with this layout:
 
@@ -38,10 +44,10 @@ The full normative design lives in
   Pure library; no fs side effects beyond the I/O the caller hands it.
 - `yurt-pack` — host CLI that builds a package archive from a source tree
   and a manifest file.
-
-The in-sandbox `pkg` binary (`install` / `remove` / `list` / `info`) and the
-registry index server are deliberately out of scope for the first cut and
-will land as follow-ups.
+- `pkg` — in-sandbox package client command surface. Network/cache/resolver
+  internals are currently stubbed and documented as follow-up work.
+- `yurt-pkg-repo`, `yurt-pkg-trust`, `yurt-repo-ci` — repository metadata,
+  trusted repo policy, and repository CI helpers.
 
 ## Usage
 

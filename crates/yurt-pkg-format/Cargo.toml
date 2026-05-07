@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Reader, validator, and writer for the .yurtpkg.tar.zst package format"
+description = "Reader, validator, and writer for the .yurtpkg package format"
 
 [dependencies]
 serde.workspace = true

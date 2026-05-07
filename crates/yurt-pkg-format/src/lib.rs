@@ -1,4 +1,4 @@
-//! Reader, validator, and writer for the `.yurtpkg.tar.zst` package format.
+//! Reader, validator, and writer for the `.yurtpkg` package format.
 //!
 //! The format is normatively defined in
 //! `yurtos-kernel/docs/superpowers/specs/2026-05-05-yurt-package-format-design.md`.

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Host CLI that builds .yurtpkg.tar.zst archives from a staged directory tree"
+description = "Host CLI that builds .yurtpkg archives from a staged directory tree"
 
 [[bin]]
 name = "yurt-pack"
