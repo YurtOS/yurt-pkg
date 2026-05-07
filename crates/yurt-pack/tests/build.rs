@@ -35,9 +35,12 @@ build       = "yurt_0"
 platform    = "wasm32-wasip1-yurt"
 summary     = "Demo package"
 license     = "Apache-2.0"
-depends     = []
 default_uid = 0
 default_gid = 0
+
+[depends]
+libfoo = "^1.2"
+libbar = ">=0.5, <1.0"
 
 [yurt]
 min_yurt_version = "0.1.0"
@@ -76,7 +79,7 @@ mode   = 0o755
         "canonical ownership should not produce the non-canonical warning, got: {stderr}"
     );
 
-    let artifact = out.join("demo-0.1.0-yurt_0.yurtpkg.tar.zst");
+    let artifact = out.join("demo-0.1.0-yurt_0.yurtpkg");
     assert!(artifact.exists(), "artifact not at {}", artifact.display());
 
     let f = fs::File::open(&artifact).unwrap();
@@ -85,6 +88,11 @@ mode   = 0o755
     assert_eq!(r.index.name, "demo");
     assert_eq!(r.index.version, "0.1.0");
     assert_eq!(r.index.build, "yurt_0");
+    assert_eq!(r.index.depends.len(), 2);
+    assert_eq!(r.index.depends[0].name, "libbar");
+    assert_eq!(r.index.depends[0].req, ">=0.5, <1.0");
+    assert_eq!(r.index.depends[1].name, "libfoo");
+    assert_eq!(r.index.depends[1].req, "^1.2");
     assert!(r.yurt.is_some());
 
     let by_path: std::collections::HashMap<&str, &yurt_pkg_format::FileEntry> =

@@ -97,12 +97,9 @@ impl IndexManifest {
         Ok(())
     }
 
-    /// Canonical artifact basename: `<name>-<version>-<build>.yurtpkg.tar.zst`.
+    /// Canonical published artifact basename: `<name>-<version>-<build>.yurtpkg`.
     pub fn artifact_basename(&self) -> String {
-        format!(
-            "{}-{}-{}.yurtpkg.tar.zst",
-            self.name, self.version, self.build
-        )
+        format!("{}-{}-{}.yurtpkg", self.name, self.version, self.build)
     }
 }
 
@@ -327,7 +324,7 @@ mod tests {
         let m = good_index();
         assert_eq!(
             m.artifact_basename(),
-            "busybox-1.36.1-yurt_0.yurtpkg.tar.zst"
+            "busybox-1.36.1-yurt_0.yurtpkg"
         );
     }
 

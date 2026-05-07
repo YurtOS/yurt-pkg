@@ -4,6 +4,8 @@
 //! the `info/index.json` and `info/yurt.json` files inside the resulting
 //! archive. The build command translates this TOML into both manifests.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -15,7 +17,7 @@ pub struct PackToml {
     pub summary: String,
     pub license: String,
     #[serde(default)]
-    pub depends: Vec<String>,
+    pub depends: BTreeMap<String, String>,
     /// Apply this uid to every walked entry unless the OS already
     /// reports a non-zero uid the author wants preserved. Defaults to 0.
     pub default_uid: Option<u32>,
