@@ -65,24 +65,33 @@ in-sandbox client. This spec adds:
 
 ### Package artifact
 
-A published package is a sigstore-signed `.yurtpkg` file with two sidecar
-artifacts, all attached to a GitHub Release on the repository repo:
+A published package is a sigstore-signed `.yurtpkg` file with one sidecar
+artifact, both attached to a GitHub Release on the repository repo:
 
 ```
 foo-1.0.0.yurtpkg                     # the existing zstd-tar archive,
                                       # renamed (no .tar.zst suffix; the
                                       # internal magic remains the source
                                       # of truth for format detection)
-foo-1.0.0.yurtpkg.sig                 # cosign signature over sha256(archive)
-foo-1.0.0.yurtpkg.cert                # sigstore cert tying signature to an
-                                      # OIDC identity
+foo-1.0.0.yurtpkg.bundle              # Sigstore Bundle (single JSON):
+                                      #   signature + Fulcio cert chain +
+                                      #   Rekor inclusion proof
 ```
+
+The bundle is produced by `cosign sign-blob --yes --bundle <out>.bundle
+foo-1.0.0.yurtpkg`. It is the [Sigstore Bundle Format][bundle] — one file
+that carries the signature, the Fulcio-issued certificate (with its OIDC
+subject and issuer extensions), and the Rekor inclusion proof with its
+`integratedTime`. Verification is offline-capable given the Fulcio root
+CA and Rekor public key bundled with the client.
 
 The signature commits to the archive bytes, which transitively commit to
 every file's content via the existing `info/files.json` per-entry hashes.
-The Rekor transparency log entry produced by cosign is recorded but not
-required for verification — clients verify against the cert's identity
-fields directly.
+The Rekor `integratedTime` provides a signed lower bound on when the
+artifact was published; clients use it for freshness checks (see
+`pkg update` flow).
+
+[bundle]: https://github.com/sigstore/protobuf-specs/blob/main/protos/sigstore_bundle.proto
 
 ### Repository manifest
 
@@ -107,12 +116,16 @@ recipes/
 
 `index.json` is the only signed object the client trusts directly. It
 commits to the hash of every `packages/<name>.json`, so the per-package
-files are transitively trusted without their own signatures:
+files are transitively trusted without their own signatures. It also
+carries monotonic-version and expiry metadata for rollback and
+freshness protection:
 
 ```json
 {
   "schema": 1,
+  "index_version": 4271,
   "generated_at": "2026-05-07T12:00:00Z",
+  "expires_at":   "2026-05-14T12:00:00Z",
   "packages": {
     "foo": {
       "sha256": "<hash of packages/foo.json>",
@@ -123,6 +136,21 @@ files are transitively trusted without their own signatures:
   }
 }
 ```
+
+`index_version` is a strictly increasing integer bumped by CI on each
+regeneration. Clients refuse any `index.json` whose `index_version` is
+not greater than the cached one — this defends against rollback to an
+older index that hides a yank or pins a vulnerable version.
+
+`expires_at` is a hard expiry: clients treat the cached index as stale
+past this point and warn loudly, refusing to use it for installs after
+a configurable grace period (default 30 days past expiry). The CI
+regenerates and re-signs the index on every package change *and* on a
+weekly cron regardless, so under normal operation `expires_at` is
+always in the future.
+
+Together these mirror TUF's freshness and rollback rules without
+adopting the full TUF metadata stack.
 
 `packages/<name>.json` lists every version of that package:
 
@@ -136,7 +164,10 @@ files are transitively trusted without their own signatures:
       "url": "https://github.com/YurtOS/yurt-packages/releases/download/foo-1.0.0/foo-1.0.0.yurtpkg",
       "sha256": "<archive sha256>",
       "size": 56789,
-      "identity": "https://github.com/YurtOS/yurt-packages/.github/workflows/release.yml@refs/heads/main",
+      "signing": {
+        "subject": "https://github.com/YurtOS/yurt-packages/.github/workflows/release.yml@refs/heads/main",
+        "issuer":  "https://token.actions.githubusercontent.com"
+      },
       "yanked": false
     },
     {
@@ -153,9 +184,14 @@ The `url` field is the public abstraction. In v1 every URL resolves to a
 GitHub Release on the repository repo itself. A future federated mode
 points the URL elsewhere; the index format does not change.
 
-The `identity` field is the OIDC subject the client requires the artifact's
-sigstore cert to match. In v1 every package's identity is the repository
-repo's own release workflow; in a federated future, it varies per package.
+The `signing` block pins both the OIDC **subject** (the workload identity,
+e.g. a GitHub Actions workflow ref) and the OIDC **issuer** (the identity
+provider, e.g. `https://token.actions.githubusercontent.com`). Sigstore
+keyless verification requires both — pinning only the subject would let a
+cert from a different OIDC provider that happened to mint a token with the
+same subject string pass verification. In v1 every package's signing
+identity is the repository repo's own release workflow; in a federated
+future, it varies per package.
 
 ### Trust model
 
@@ -165,10 +201,11 @@ runtime:
 ```toml
 # /etc/yurt-pkg/trusted-repos.toml
 [[repo]]
-id        = "yurt-core"
-url       = "https://github.com/YurtOS/yurt-packages"
-identity  = "https://github.com/YurtOS/yurt-packages/.github/workflows/release.yml@refs/heads/main"
-priority  = 0
+id              = "yurt-core"
+url             = "https://github.com/YurtOS/yurt-packages"
+signing_subject = "https://github.com/YurtOS/yurt-packages/.github/workflows/release.yml@refs/heads/main"
+signing_issuer  = "https://token.actions.githubusercontent.com"
+priority        = 0
 ```
 
 The image builder (yurt's existing build process) bakes in the official
@@ -183,25 +220,29 @@ or rebuild time when running with elevated privileges; the sandbox UX is
 "command exists, returns a permission error".
 
 Per-package signing identity is **not** stored on the client. The signed
-`index.json` declares each package's expected identity via the per-version
-`identity` field; the client verifies the artifact's sigstore cert against
-that field at install time. The "same identity as the last version" rule
-is enforced by the repository repo's CI on PRs (see Repository repo CI
-flow). A
-legitimate identity migration is a reviewable PR diff, not a client
-prompt.
+`index.json` declares each package's expected `signing.subject` and
+`signing.issuer` via the per-version entries; the client verifies the
+artifact's sigstore cert against both fields at install time. The "same
+identity as the last version" rule is enforced by the repository repo's
+CI on PRs (see Repository repo CI flow). A legitimate identity migration
+is a reviewable PR diff, not a client prompt.
 
 ### Client filesystem layout
 
 ```
 /etc/yurt-pkg/
   trusted-repos.toml                  # immutable from default sandbox
+  sigstore-trust-root/                # Fulcio root CA + Rekor public key,
+                                      #   pinned at image build. Updated
+                                      #   only via image rebuild. Format
+                                      #   matches the Sigstore TUF
+                                      #   trust-root layout.
 
 /var/cache/yurt-pkg/repos/<repo-id>/  # writable runtime state
   index.json
-  index.json.sig
-  index.json.cert
-  meta.json                           # etag, last_fetched, last_good_cert,
+  index.json.bundle                   # Sigstore Bundle (sig + cert + Rekor proof)
+  meta.json                           # etag, last_fetched, last_index_version,
+                                      #   last_integrated_time,
                                       #   consecutive_fetch_failures
   packages/
     foo.json
@@ -223,19 +264,33 @@ namespaced by the trusted config.
 1. `GET <repo url>/raw/main/index.json` with
    `If-None-Match: <cached-etag>`. On 304, write a fresh `last_fetched` to
    `meta.json` and exit successfully.
-2. On 200: download `index.json`, `.sig`, `.cert`. Verify the signature's
-   sigstore cert OIDC subject matches the trusted `identity` for the repo.
-   Reject if not.
+2. On 200: download `index.json` and `index.json.bundle`. Verify, in
+   order, all of:
+   - The bundle's Fulcio cert chains to the trusted Fulcio root.
+   - The cert's OIDC subject equals the repo's `signing_subject`, and the
+     cert's OIDC issuer extension equals the repo's `signing_issuer`.
+   - The signature in the bundle is valid over `sha256(index.json)` using
+     the cert's public key.
+   - The Rekor inclusion proof in the bundle verifies against the trusted
+     Rekor public key.
+   - The new `index_version` is strictly greater than the cached
+     `last_index_version` (rollback check).
+   - The Rekor `integratedTime` is greater than or equal to the cached
+     `last_integrated_time` (independent freshness check; defends against
+     replay even when `index_version` is suppressed).
+   - `expires_at` is in the future, modulo a configurable past-grace.
+
+   Any failure aborts the update and leaves the cache untouched. The
+   client continues to serve queries from the last-good index;
+   `consecutive_fetch_failures` is bumped so `pkg update` can warn after N
+   failures, and `expires_at` lateness is its own escalating warning.
 3. Parse the new index. Diff its `packages` map against the cached one. For
    every package whose `sha256` changed (or is new), fetch
    `packages/<name>.json` and verify its hash against the value committed
    by the signed index. No separate per-package signature.
 4. Update `db.sqlite` incrementally for changed packages only. Drop entries
-   for removed packages.
-
-A failure at step 2 leaves the cache untouched; the client continues to
-serve queries from the last-good index. `consecutive_fetch_failures` in
-`meta.json` is bumped so `pkg update` can warn after N failures.
+   for removed packages. Persist the new `index_version` and `integratedTime`
+   to `meta.json`.
 
 ### `pkg install` and `pkg upgrade` verification
 
@@ -245,12 +300,20 @@ Per package being installed:
    non-yanked).
 2. Fetch the `url` to a temp file. Stream-hash to verify against the
    `sha256` committed by the (already-trusted) index.
-3. Fetch `url + ".sig"` and `url + ".cert"`. Verify the cert's OIDC
-   subject matches the version's `identity` field. Verify the signature
-   over the archive's bytes.
+3. Fetch `url + ".bundle"`. Verify, in order:
+   - Fulcio cert chains to the trusted Fulcio root.
+   - Cert's OIDC subject equals the version's `signing.subject`, issuer
+     equals `signing.issuer`.
+   - Signature is valid over the archive's bytes.
+   - Rekor inclusion proof verifies; `integratedTime` is consistent with
+     the cert's `notBefore`/`notAfter` window.
 4. Hand the archive to `yurt-pkg-format` for the existing per-file
    validation against `info/files.json`.
 5. Atomically apply to the install root and record in `installed.sqlite`.
+   The all-or-nothing contract is in scope (a failed transaction leaves
+   no partial state visible to subsequent commands); the *implementation
+   strategy* — staged copies, journaled rename, snapshot-and-swap, etc. —
+   is the resolver/installer spec's problem.
 
 Yanked versions never appear in resolver results. An explicit
 `pkg install foo@1.0.1` of a yanked version fails with the
@@ -304,6 +367,17 @@ libbaz = "~1.4.0"          # >=1.4.0, <1.5.0
 
 [package.yurt]
 min_yurt_version = "0.1.0"
+
+# The signing identity this version will be published under. CI compares
+# this against the most recent existing version's `signing` block in
+# packages/<name>.json before merge (signer-continuity check). For v1,
+# the only legal value is the repository repo's own release workflow;
+# the lint rejects anything else. The block is declared in the recipe
+# rather than synthesised so that continuity can be enforced at PR time,
+# before any signed JSON is regenerated.
+[package.signing]
+subject = "https://github.com/YurtOS/yurt-packages/.github/workflows/release.yml@refs/heads/main"
+issuer  = "https://token.actions.githubusercontent.com"
 ```
 
 Most packages use the declarative `steps` form. The `extended_build`
@@ -368,25 +442,44 @@ On a PR that adds or modifies `recipes/<name>/<version>/`:
    from `false` to `true` without a CODEOWNERS-required review path
    (configured at the repo level, outside this spec).
 2. **Signer continuity**: if `<name>` already has versions in
-   `packages/<name>.json`, fail the PR if the new version's declared
-   `identity` differs from the most recent existing version's `identity`,
-   unless the PR also includes a `MIGRATION.md` and is approved by a repo
-   maintainer. This is the "same signer as before" rule.
+   `packages/<name>.json`, read the most recent existing version's
+   `signing.subject` and `signing.issuer`. Compare against the proposed
+   `[package.signing]` block in the new recipe. Fail the PR on any
+   mismatch unless the PR also includes a `MIGRATION.md` and is approved
+   by a repo maintainer. This is the "same signer as before" rule, and
+   it works at PR time because the proposed identity is declared in the
+   recipe — no signed JSON has been regenerated yet.
+   For v1, an additional lint pins `signing.subject` and `signing.issuer`
+   to the repository repo's own release workflow values; any other value
+   is a hard error.
 3. **Build**: in a clean container, fetch `[source].url`, verify
    `[source].sha256`, run `[build].steps` (or `build.sh`), and call
    `yurt-pack build $STAGE --manifest <derived> --out dist/`.
-4. **Sign**: `cosign sign-blob --yes dist/<name>-<version>.yurtpkg`.
-   Sigstore-keyless via the workflow's OIDC token; `.sig` and `.cert`
-   produced as sidecars.
+4. **Sign**:
+   ```
+   cosign sign-blob --yes \
+     --bundle dist/<name>-<version>.yurtpkg.bundle \
+     dist/<name>-<version>.yurtpkg
+   ```
+   Sigstore-keyless via the workflow's OIDC token. The single `.bundle`
+   sidecar carries the signature, the Fulcio cert chain, and the Rekor
+   inclusion proof — this is the artifact layout the client fetches.
 5. **Release**: create a GitHub Release tagged `<name>-<version>`,
-   attach the three artifacts.
-6. **Index regen**: regenerate `packages/<name>.json` and `index.json`,
-   sign `index.json` the same way, commit all three signed files back to
-   the repo's main branch.
+   attach `<name>-<version>.yurtpkg` and `<name>-<version>.yurtpkg.bundle`.
+6. **Index regen**: regenerate `packages/<name>.json` (copying the
+   recipe's `[package.signing]` into the version entry) and `index.json`
+   (with `index_version` bumped and `expires_at` set to now + 7 days).
+   Sign `index.json` the same way, producing `index.json.bundle`. Commit
+   the three updated/signed files back to the repo's main branch.
 
 Step 6 produces the index updates as a follow-up commit on main rather
 than as part of the PR, so PRs only diff recipes and metadata, not signed
 JSON. The commit is made by a bot identity tied to the same workflow.
+
+A separate weekly cron workflow on the repository repo regenerates and
+re-signs `index.json` even when no packages have changed, bumping
+`index_version` and refreshing `expires_at`. This keeps the freshness
+window valid for clients that haven't seen a package change in a while.
 
 ### Crate structure
 
@@ -409,11 +502,31 @@ crates/
 
 **Sigstore on WASI risk**: the whole plan rides on the `sigstore` Rust
 crate (rustls-based) working under `wasm32-wasip1`. Smoke-test this
-before sinking work into `yurt-pkg-repo`. Fallback if it does not:
-verification in CI uses `cosign` directly; the in-sandbox client uses
-raw ed25519 verification against a public key extracted from the cert
-and pinned in the manifest. The data shapes above do not change in
-either case.
+before sinking work into `yurt-pkg-repo`.
+
+If the `sigstore` crate does not work cleanly under WASI, the fallback
+is to reimplement only the verification path the client needs (signing
+remains in CI via `cosign`, which runs on the host):
+
+- Bundle parsing: parse the Sigstore Bundle protobuf/JSON ourselves.
+- Cert-chain validation: use `webpki` (rustls's X.509 verifier) to
+  validate the embedded Fulcio cert chain against a Fulcio root pinned
+  in the client. Fulcio's root is the issuing CA; the per-signature
+  cert is ephemeral and not trusted by itself.
+- OIDC subject/issuer extraction: parse the X.509 SAN/extensions for
+  the Sigstore-defined OIDs (`1.3.6.1.4.1.57264.1.x`) and compare
+  against the trusted `signing_subject` / `signing_issuer`.
+- Signature: ECDSA-P256 verify of the cert's public key over the
+  hashed payload.
+- Rekor: parse the inclusion proof in the bundle, verify the SET
+  against the pinned Rekor public key.
+
+The point is that the trust roots are still the *Fulcio CA* and the
+*Rekor public key* — both pinned in the client at image build time
+alongside `trusted-repos.toml`. We do not pin per-package public
+keys; that would be wrong because Fulcio certs are ephemeral. The
+data shapes (bundles, manifest entries) do not change between the
+crate-based and fallback paths.
 
 ### `pkg` (in-sandbox binary) surface
 
@@ -429,8 +542,12 @@ either case.
 | `pkg add-repo <url> --identity <oidc-subject>` | `repo:write` capability — denied in default sandbox |
 | `pkg trust ...` | `repo:write` capability |
 
-Resolver behaviour, install hooks, conflict handling, and atomicity
-guarantees for the install root are out of scope for this spec.
+The all-or-nothing transaction *contract* (no partial state visible
+after a failed install/upgrade) is in scope and called out where
+relevant above. The *implementation strategy* for it (staged copies,
+journaled rename, snapshot-and-swap), along with resolver algorithm
+internals, install hooks, and conflict handling between files owned
+by different packages, is out of scope for this spec.
 
 ## Open questions
 
