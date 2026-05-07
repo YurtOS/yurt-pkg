@@ -23,3 +23,9 @@ clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 hex = "0.4"
 tempfile = "3"
+semver = { version = "1", features = ["serde"] }
+toml = "0.8"
+time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known", "macros"] }
+url = { version = "2", features = ["serde"] }
+assert_cmd = "2"
+predicates = "3"
