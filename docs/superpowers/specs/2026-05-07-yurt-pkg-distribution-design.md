@@ -100,8 +100,7 @@ The repository repo is a single GitHub repo (e.g.
 
 ```
 index.json                          # signed top-level index
-index.json.sig
-index.json.cert
+index.json.bundle                   # Sigstore Bundle covering index.json
 packages/
   foo.json                          # all versions of foo
   bar.json
@@ -262,8 +261,16 @@ namespaced by the trusted config.
 ### `pkg update` flow
 
 1. `GET <repo url>/raw/main/index.json` with
-   `If-None-Match: <cached-etag>`. On 304, write a fresh `last_fetched` to
-   `meta.json` and exit successfully.
+   `If-None-Match: <cached-etag>`. On 304: re-evaluate the cached index's
+   `expires_at` against the current time. If still in the freshness
+   window, write a fresh `last_fetched` and exit successfully. If past
+   `expires_at`, treat the same as a stale-cache failure: bump
+   `consecutive_fetch_failures`, emit the escalating staleness warning,
+   and — past the configured grace period — make subsequent install /
+   upgrade operations refuse to run until a non-304 update succeeds.
+   The 304 path must not silently extend the freshness window just
+   because the upstream bytes are unchanged; freshness is a property of
+   the signed index, not of the HTTP response.
 2. On 200: download `index.json` and `index.json.bundle`. Verify, in
    order, all of:
    - The bundle's Fulcio cert chains to the trusted Fulcio root.
@@ -488,7 +495,10 @@ crates/
   yurt-pkg-format       (existing)  read/write/validate the .yurtpkg archive
   yurt-pkg-repo         (new)       index.json + packages/<name>.json read/write,
                                     diffing for `pkg update`, sigstore verification glue
-  yurt-pkg-trust        (new)       trusted-repos.toml, OIDC identity matching
+  yurt-pkg-trust        (new)       trusted-repos.toml, sigstore trust-root
+                                    loading, signing-identity policy
+                                    (subject + issuer matching against the
+                                    trusted entries; no per-package keys)
   yurt-pack             (existing)  local builder; gains an ad-hoc `--sign` flag.
                                     CI uses cosign directly and does not depend on this.
   yurt-repo-ci          (new)       run by the repository repo's GH Actions: parse
@@ -539,8 +549,8 @@ crate-based and fallback paths.
 | `pkg upgrade [<name>...]` | as install. No args = upgrade all. Skips yanked. Default prompts; `-y` skips; `--dry-run` prints plan only. Hard errors on transitive downgrade unless `--allow-downgrade`. |
 | `pkg remove <name>` | fs write to install root, `installed.sqlite` |
 | `pkg list [--yanked]` | fs read of `installed.sqlite` |
-| `pkg add-repo <url> --identity <oidc-subject>` | `repo:write` capability — denied in default sandbox |
-| `pkg trust ...` | `repo:write` capability |
+| `pkg add-repo <url> --signing-subject <s> --signing-issuer <i> [--id <name>] [--priority <n>]` | `repo:write` capability — denied in default sandbox. Both subject and issuer are required; there is no default for either, and there is no interactive prompt. The added entry has the same shape as a `[[repo]]` block in `trusted-repos.toml`. |
+| `pkg trust ...` | `repo:write` capability. Subcommands for inspecting and (with capability) modifying the trust store; concrete subcommand surface deferred. |
 
 The all-or-nothing transaction *contract* (no partial state visible
 after a failed install/upgrade) is in scope and called out where
