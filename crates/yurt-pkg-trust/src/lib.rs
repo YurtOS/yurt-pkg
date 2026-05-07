@@ -15,10 +15,7 @@ pub enum Error {
     #[error("duplicate repo id '{0}'")]
     DuplicateRepoId(String),
     #[error("invalid repo url for '{id}': {source}")]
-    InvalidRepoUrl {
-        id: String,
-        source: url::ParseError,
-    },
+    InvalidRepoUrl { id: String, source: url::ParseError },
     #[error("repo '{0}' has an empty signing subject")]
     EmptySubject(String),
     #[error("repo '{0}' has an empty signing issuer")]

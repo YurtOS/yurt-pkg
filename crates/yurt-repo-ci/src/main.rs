@@ -75,7 +75,8 @@ fn lint_continuity(
 ) -> Result<()> {
     let package_text = fs::read_to_string(package_file)
         .with_context(|| format!("reading {}", package_file.display()))?;
-    let package: PackageFile = serde_json::from_str(&package_text).context("parsing package JSON")?;
+    let package: PackageFile =
+        serde_json::from_str(&package_text).context("parsing package JSON")?;
     package.validate().map_err(|err| anyhow!(err))?;
 
     let recipe_text = fs::read_to_string(recipe_path)

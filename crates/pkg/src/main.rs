@@ -11,11 +11,21 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Update,
-    Search { query: String },
-    Info { name: String },
-    Install { spec: String },
-    Upgrade { names: Vec<String> },
-    Remove { name: String },
+    Search {
+        query: String,
+    },
+    Info {
+        name: String,
+    },
+    Install {
+        spec: String,
+    },
+    Upgrade {
+        names: Vec<String>,
+    },
+    Remove {
+        name: String,
+    },
     List {
         #[arg(long)]
         yanked: bool,

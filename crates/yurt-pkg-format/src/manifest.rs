@@ -322,10 +322,7 @@ mod tests {
     #[test]
     fn index_artifact_basename_matches_spec() {
         let m = good_index();
-        assert_eq!(
-            m.artifact_basename(),
-            "busybox-1.36.1-yurt_0.yurtpkg"
-        );
+        assert_eq!(m.artifact_basename(), "busybox-1.36.1-yurt_0.yurtpkg");
     }
 
     #[test]

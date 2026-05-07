@@ -11,7 +11,9 @@ use yurt_pkg_trust::SigningIdentity;
 pub enum Error {
     #[error("unsupported schema {0}")]
     UnsupportedSchema(u32),
-    #[error("index rollback: new version {new_version} is not greater than cached {cached_version}")]
+    #[error(
+        "index rollback: new version {new_version} is not greater than cached {cached_version}"
+    )]
     Rollback {
         new_version: u64,
         cached_version: u64,
@@ -118,7 +120,11 @@ impl PackageFile {
         validate_package_name(&self.name)
             .map_err(|_| Error::InvalidPackageName(self.name.clone()))?;
         for version in &self.versions {
-            if version.name.as_deref().is_some_and(|name| name != self.name) {
+            if version
+                .name
+                .as_deref()
+                .is_some_and(|name| name != self.name)
+            {
                 return Err(Error::NameMismatch {
                     file_name: self.name.clone(),
                     version_name: version.name.clone().unwrap(),
