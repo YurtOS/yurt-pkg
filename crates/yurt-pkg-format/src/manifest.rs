@@ -9,8 +9,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-/// Initial schema version for both `info/index.json` and the registry index.
-pub const SCHEMA_VERSION: u32 = 1;
+/// Schema version for `info/index.json`.
+///
+/// Version 2 changes `depends` from the v1 transparent string list to
+/// structured `{ name, req }` objects. No released v1 archives with
+/// non-empty dependencies exist in the wild, so no compatibility reader is
+/// required for this migration.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Canonical Yurt ownership: root.
 pub const CANONICAL_ROOT_UID: u32 = 0;
@@ -41,6 +46,17 @@ pub fn validate_package_name(name: &str) -> Result<()> {
         }));
     }
     Ok(())
+}
+
+/// Validate a SHA-256 digest encoded as 64 hexadecimal ASCII characters.
+pub fn validate_sha256_hex(label: &str, value: &str) -> Result<()> {
+    if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(Error::InvalidManifest(format!(
+            "invalid sha256 for '{label}'"
+        )))
+    }
 }
 
 fn is_valid_package_name(name: &str) -> bool {
@@ -92,41 +108,29 @@ impl IndexManifest {
         Ok(())
     }
 
-    /// Canonical artifact basename: `<name>-<version>-<build>.yurtpkg.tar.zst`.
+    /// Canonical published artifact basename: `<name>-<version>-<build>.yurtpkg`.
     pub fn artifact_basename(&self) -> String {
-        format!(
-            "{}-{}-{}.yurtpkg.tar.zst",
-            self.name, self.version, self.build
-        )
+        format!("{}-{}-{}.yurtpkg", self.name, self.version, self.build)
     }
 }
 
-/// A dependency constraint.
-///
-/// First-cut serialization is the Conda-like single-string form, e.g.
-/// `"libz >=1.3,<2"`. The string is preserved as-is for the future solver;
-/// validation only enforces non-emptiness.
+/// A dependency constraint in package metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(transparent)]
-pub struct Depends(pub String);
+pub struct Depends {
+    pub name: String,
+    pub req: String,
+}
 
 impl Depends {
     pub fn validate(&self) -> Result<()> {
-        if self.0.trim().is_empty() {
-            return Err(Error::InvalidManifest(
-                "dependency entry must not be empty".into(),
-            ));
-        }
+        validate_package_name(&self.name)?;
+        semver::VersionReq::parse(&self.req).map_err(|err| {
+            Error::InvalidManifest(format!(
+                "invalid dependency requirement '{}' for '{}': {err}",
+                self.req, self.name
+            ))
+        })?;
         Ok(())
-    }
-
-    /// Package name portion (everything before the first space, if any).
-    pub fn name(&self) -> &str {
-        self.0
-            .split_once(char::is_whitespace)
-            .map(|(n, _)| n)
-            .unwrap_or(&self.0)
-            .trim()
     }
 }
 
@@ -309,6 +313,11 @@ mod tests {
     }
 
     #[test]
+    fn structured_dependencies_use_schema_version_2() {
+        assert_eq!(SCHEMA_VERSION, 2);
+    }
+
+    #[test]
     fn index_validates_and_round_trips() {
         let m = good_index();
         m.validate().unwrap();
@@ -320,10 +329,7 @@ mod tests {
     #[test]
     fn index_artifact_basename_matches_spec() {
         let m = good_index();
-        assert_eq!(
-            m.artifact_basename(),
-            "busybox-1.36.1-yurt_0.yurtpkg.tar.zst"
-        );
+        assert_eq!(m.artifact_basename(), "busybox-1.36.1-yurt_0.yurtpkg");
     }
 
     #[test]
@@ -378,16 +384,34 @@ mod tests {
     }
 
     #[test]
-    fn depends_extracts_name() {
-        let d = Depends("libz >=1.3,<2".into());
-        assert_eq!(d.name(), "libz");
-        let d2 = Depends("busybox".into());
-        assert_eq!(d2.name(), "busybox");
+    fn dependency_requires_valid_name_and_semver_req() {
+        let dep = Depends {
+            name: "libfoo".to_string(),
+            req: "^1.2".to_string(),
+        };
+        dep.validate().unwrap();
+
+        let bad_name = Depends {
+            name: "LibFoo".to_string(),
+            req: "^1.2".to_string(),
+        };
+        assert!(bad_name.validate().is_err());
+
+        let bad_req = Depends {
+            name: "libfoo".to_string(),
+            req: "=>1".to_string(),
+        };
+        assert!(bad_req.validate().is_err());
     }
 
     #[test]
-    fn depends_rejects_blank() {
-        assert!(Depends("   ".into()).validate().is_err());
+    fn dependency_serializes_as_name_req_object() {
+        let dep = Depends {
+            name: "libfoo".to_string(),
+            req: "^1.2".to_string(),
+        };
+        let json = serde_json::to_string(&dep).unwrap();
+        assert_eq!(json, r#"{"name":"libfoo","req":"^1.2"}"#);
     }
 
     #[test]
@@ -586,5 +610,13 @@ mod tests {
         assert!(format!("{err}").contains("must not be empty"));
         let err = validate_package_name("BadName").unwrap_err();
         assert!(format!("{err}").contains("must match"));
+    }
+
+    #[test]
+    fn validate_sha256_hex_is_public_and_structured() {
+        validate_sha256_hex("archive", &"ab".repeat(32)).unwrap();
+        let err = validate_sha256_hex("archive", "abc").unwrap_err();
+        assert!(format!("{err}").contains("invalid sha256"));
+        assert!(format!("{err}").contains("archive"));
     }
 }

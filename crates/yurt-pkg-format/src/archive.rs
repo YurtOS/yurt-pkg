@@ -1,4 +1,4 @@
-//! Read and write `.yurtpkg.tar.zst` archives.
+//! Read and write `.yurtpkg` archives.
 //!
 //! The on-disk layout is:
 //! ```text
@@ -50,7 +50,7 @@ impl EntryKind {
     }
 }
 
-/// Read a `.yurtpkg.tar.zst` archive from any [`std::io::Read`] source.
+/// Read a `.yurtpkg` archive from any [`std::io::Read`] source.
 #[derive(Debug)]
 pub struct Reader {
     pub index: IndexManifest,
@@ -318,7 +318,7 @@ fn u32_from_tar_u64(v: u64, path: &str, field: &'static str) -> Result<u32> {
     })
 }
 
-/// Write a `.yurtpkg.tar.zst` archive.
+/// Write a `.yurtpkg` archive.
 ///
 /// The writer expects callers to add archive entries in any order; on
 /// `finish()` it computes `info/files.json` automatically from what was

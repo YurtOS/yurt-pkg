@@ -1,4 +1,4 @@
-//! `yurt-pack` — host CLI for building `.yurtpkg.tar.zst` archives.
+//! `yurt-pack` — host CLI for building `.yurtpkg` archives.
 //!
 //! The CLI walks a staged source tree, reads a TOML manifest describing
 //! package identity and (optionally) runtime requirements, and produces
@@ -37,7 +37,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Build a `.yurtpkg.tar.zst` archive from a staged source tree.
+    /// Build a `.yurtpkg` archive from a staged source tree.
     Build {
         /// Staged source directory. Layout under here maps 1:1 to VFS paths.
         source: PathBuf,
@@ -45,7 +45,7 @@ enum Cmd {
         #[arg(long, short)]
         manifest: PathBuf,
         /// Output directory. The artifact is written as
-        /// `<name>-<version>-<build>.yurtpkg.tar.zst` inside this dir.
+        /// `<name>-<version>-<build>.yurtpkg` inside this dir.
         #[arg(long, short)]
         out: PathBuf,
     },
@@ -76,7 +76,14 @@ fn build(source: &Path, manifest_path: &Path, out: &Path) -> anyhow::Result<()> 
         platform: manifest.platform.clone(),
         summary: manifest.summary.clone(),
         license: manifest.license.clone(),
-        depends: manifest.depends.iter().cloned().map(Depends).collect(),
+        depends: manifest
+            .depends
+            .iter()
+            .map(|(name, req)| Depends {
+                name: name.clone(),
+                req: req.clone(),
+            })
+            .collect(),
     };
 
     let yurt = manifest.yurt.as_ref().map(|y| YurtManifest {
