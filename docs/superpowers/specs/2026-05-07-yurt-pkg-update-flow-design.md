@@ -256,11 +256,12 @@ cache is initialized may report without writing `state.json`.
 The signed index entry URL is authoritative. Clients must not assume
 `packages/<name>.json` as the fetch URL.
 
-If `RepoPackage.url` starts with `packages/`, it is a repository-relative URL
-resolved against the trusted repo base URL. Existing validation already
-restricts this form to one file below `packages/` ending in `.json`; path
-traversal and nested relative layouts are invalid. Relative package requests
-inherit the same authentication context as the index request.
+If `RepoPackage.url` is relative, it is resolved against the trusted repo base
+URL. Relative URLs must be non-empty, end in `.json`, and must not contain empty
+segments, `.`, `..`, or a leading slash. The canonical generated layout remains
+`packages/<name>.json`, but clients accept safe noncanonical relative paths such
+as `pkg/foo-v1.json` because the signed index URL is authoritative. Relative
+package requests inherit the same authentication context as the index request.
 
 If `RepoPackage.url` is absolute, the fetcher receives that absolute URL. v1
 allows absolute URLs because the repository format is federation-ready, but

@@ -116,7 +116,7 @@ where
         let mut fetch_started = false;
         let result = self.update_repo_locked(repo, options, &mut fetch_started);
         if result.is_err() && fetch_started {
-            self.increment_failure_count(repo, options.now)?;
+            let _ = self.increment_failure_count(repo, options.now);
         }
         result
     }
