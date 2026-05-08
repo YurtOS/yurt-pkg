@@ -107,27 +107,25 @@ pub struct RepoPackage {
 impl RepoPackage {
     fn validate(&self, name: &str) -> Result<()> {
         validate_sha256(name, &self.sha256)?;
-        if self.url.starts_with("packages/") {
+        if Url::parse(&self.url).is_ok() {
+            return Ok(());
+        }
+        if !self.url.starts_with('/') {
             validate_package_relative_url(name, &self.url)?;
         } else {
-            Url::parse(&self.url).map_err(|err| Error::InvalidUrl(name.to_string(), err))?;
+            return Err(Error::InvalidPackageRelativeUrl {
+                package: name.to_string(),
+                url: self.url.clone(),
+            });
         }
         Ok(())
     }
 }
 
 fn validate_package_relative_url(name: &str, url: &str) -> Result<()> {
-    let Some(file_name) = url.strip_prefix("packages/") else {
-        return Err(Error::InvalidPackageRelativeUrl {
-            package: name.to_string(),
-            url: url.to_string(),
-        });
-    };
-    if file_name.is_empty()
-        || file_name.contains('/')
-        || file_name == "."
-        || file_name == ".."
-        || !file_name.ends_with(".json")
+    if url.is_empty()
+        || url.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || !url.ends_with(".json")
     {
         return Err(Error::InvalidPackageRelativeUrl {
             package: name.to_string(),

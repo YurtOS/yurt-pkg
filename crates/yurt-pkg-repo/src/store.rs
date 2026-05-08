@@ -3,6 +3,7 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
@@ -10,6 +11,8 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::state::{RepoState, SnapshotManifest};
+
+static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -191,9 +194,10 @@ impl RepoCacheStore {
     pub fn snapshot_id(now: OffsetDateTime, index_version: u64, index_bytes: &[u8]) -> String {
         let digest = Sha256::digest(index_bytes);
         format!(
-            "{}-{}-{}-{}",
+            "{}-{}-{}-{}-{}",
             now.unix_timestamp_nanos(),
             std::process::id(),
+            SNAPSHOT_COUNTER.fetch_add(1, Ordering::Relaxed),
             index_version,
             hex::encode(&digest[..4])
         )
