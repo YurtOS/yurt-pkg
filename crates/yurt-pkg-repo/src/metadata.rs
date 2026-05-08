@@ -124,7 +124,9 @@ impl RepoPackage {
 
 fn validate_package_relative_url(name: &str, url: &str) -> Result<()> {
     if url.is_empty()
-        || url.split('/').any(|part| part.is_empty() || part == "." || part == "..")
+        || url
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
         || !url.ends_with(".json")
     {
         return Err(Error::InvalidPackageRelativeUrl {

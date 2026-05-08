@@ -56,7 +56,11 @@ impl RepoSearchIndex {
         Self { path: path.into() }
     }
 
-    pub fn rebuild(path: impl AsRef<Path>, repo_id: &str, packages: &[PackageFile]) -> Result<Self> {
+    pub fn rebuild(
+        path: impl AsRef<Path>,
+        repo_id: &str,
+        packages: &[PackageFile],
+    ) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let conn = Connection::open(&path).map_err(|source| Error::Sqlite {
             path: path.clone(),
@@ -94,12 +98,15 @@ impl RepoSearchIndex {
 
         for package in packages {
             let mut indexed_package = package.clone();
-            indexed_package.versions.sort_by(|a, b| compare_versions(b, a));
+            indexed_package
+                .versions
+                .sort_by(|a, b| compare_versions(b, a));
             let latest = latest_non_yanked(&indexed_package);
-            let package_json = serde_json::to_string(&indexed_package).map_err(|source| Error::Json {
-                package: package.name.clone(),
-                source,
-            })?;
+            let package_json =
+                serde_json::to_string(&indexed_package).map_err(|source| Error::Json {
+                    package: package.name.clone(),
+                    source,
+                })?;
             conn.execute(
                 r#"
                 INSERT INTO packages
@@ -252,9 +259,7 @@ impl SearchIndexes {
         results.sort_by(|a, b| {
             let a_pri = trusted_priorities.get(&a.repo_id).copied().unwrap_or(0);
             let b_pri = trusted_priorities.get(&b.repo_id).copied().unwrap_or(0);
-            a_pri
-                .cmp(&b_pri)
-                .then_with(|| a.repo_id.cmp(&b.repo_id))
+            a_pri.cmp(&b_pri).then_with(|| a.repo_id.cmp(&b.repo_id))
         });
         Ok(results)
     }
@@ -269,7 +274,10 @@ fn row_precedes(
         .get(&candidate.repo_id)
         .copied()
         .unwrap_or(0);
-    let current_priority = trusted_priorities.get(&current.repo_id).copied().unwrap_or(0);
+    let current_priority = trusted_priorities
+        .get(&current.repo_id)
+        .copied()
+        .unwrap_or(0);
     candidate_priority
         .cmp(&current_priority)
         .then_with(|| candidate.repo_id.cmp(&current.repo_id))
@@ -285,14 +293,20 @@ fn latest_non_yanked(package: &PackageFile) -> Option<(String, String)> {
         .map(|version| (version.version.clone(), version.build.clone()))
 }
 
-fn compare_versions(a: &crate::metadata::PackageVersion, b: &crate::metadata::PackageVersion) -> std::cmp::Ordering {
+fn compare_versions(
+    a: &crate::metadata::PackageVersion,
+    b: &crate::metadata::PackageVersion,
+) -> std::cmp::Ordering {
     let a_version = Version::parse(&a.version);
     let b_version = Version::parse(&b.version);
     match (a_version, b_version) {
         (Ok(a_version), Ok(b_version)) => a_version
             .cmp(&b_version)
             .then_with(|| a.build.cmp(&b.build)),
-        _ => a.version.cmp(&b.version).then_with(|| a.build.cmp(&b.build)),
+        _ => a
+            .version
+            .cmp(&b.version)
+            .then_with(|| a.build.cmp(&b.build)),
     }
 }
 

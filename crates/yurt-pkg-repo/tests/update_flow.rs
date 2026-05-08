@@ -1,3 +1,5 @@
+#![cfg(feature = "test-fixtures")]
+
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs;
@@ -42,8 +44,7 @@ fn package_file(name: &str, version: &str) -> PackageFile {
             version: version.to_string(),
             build: "yurt_0".to_string(),
             url: format!("https://example.com/{name}.yurtpkg"),
-            sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-                .to_string(),
+            sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
             size: 1,
             signing: SigningIdentity {
                 subject: "subject".to_string(),
@@ -107,7 +108,12 @@ fn trust_root() -> TrustRoot {
     TrustRoot::from_dir("/tmp/yurt-pkg-test-trust-root")
 }
 
-fn fetcher_with_index(repo: &TrustedRepo, index: Vec<u8>, package_url: &str, package: Vec<u8>) -> MemoryFetcher {
+fn fetcher_with_index(
+    repo: &TrustedRepo,
+    index: Vec<u8>,
+    package_url: &str,
+    package: Vec<u8>,
+) -> MemoryFetcher {
     let mut fetcher = MemoryFetcher::default();
     fetcher.insert(repo.url.join("index.json").unwrap(), index, None);
     fetcher.insert(
@@ -126,7 +132,10 @@ fn update_fetches_signed_index_and_rebuilds_search_index() {
     let tool = package_bytes("tool", "1.0.0");
     let index = index_bytes(
         1,
-        BTreeMap::from([("tool".to_string(), repo_package(&tool, "packages/tool.json"))]),
+        BTreeMap::from([(
+            "tool".to_string(),
+            repo_package(&tool, "packages/tool.json"),
+        )]),
     );
     let fetcher = fetcher_with_index(&repo, index, "packages/tool.json", tool);
     let store = RepoCacheStore::new(temp.path());
@@ -190,7 +199,10 @@ fn package_name_must_match_index_key() {
     let other = package_bytes("other", "1.0.0");
     let index = index_bytes(
         1,
-        BTreeMap::from([("tool".to_string(), repo_package(&other, "packages/tool.json"))]),
+        BTreeMap::from([(
+            "tool".to_string(),
+            repo_package(&other, "packages/tool.json"),
+        )]),
     );
     let fetcher = fetcher_with_index(&repo, index, "packages/tool.json", other);
     let engine = UpdateEngine {
@@ -215,7 +227,10 @@ fn unchanged_package_files_are_carried_forward_to_new_snapshot() {
     let index = index_bytes(
         2,
         BTreeMap::from([
-            ("tool".to_string(), repo_package(&tool, "packages/tool.json")),
+            (
+                "tool".to_string(),
+                repo_package(&tool, "packages/tool.json"),
+            ),
             (
                 "new-tool".to_string(),
                 repo_package(&new_tool, "packages/new-tool.json"),
@@ -223,9 +238,21 @@ fn unchanged_package_files_are_carried_forward_to_new_snapshot() {
         ]),
     );
     let mut fetcher = MemoryFetcher::default();
-    fetcher.insert(repo.url.join("index.json").unwrap(), index, Some("index-2".into()));
-    fetcher.insert(repo.url.join("index.json.bundle").unwrap(), b"bundle".to_vec(), None);
-    fetcher.insert(repo.url.join("packages/new-tool.json").unwrap(), new_tool, None);
+    fetcher.insert(
+        repo.url.join("index.json").unwrap(),
+        index,
+        Some("index-2".into()),
+    );
+    fetcher.insert(
+        repo.url.join("index.json.bundle").unwrap(),
+        b"bundle".to_vec(),
+        None,
+    );
+    fetcher.insert(
+        repo.url.join("packages/new-tool.json").unwrap(),
+        new_tool,
+        None,
+    );
     let store = RepoCacheStore::new(temp.path());
     let engine = UpdateEngine {
         fetcher,
@@ -250,7 +277,10 @@ fn removed_package_files_are_omitted_from_new_snapshot() {
     let other = package_bytes("other", "1.0.0");
     let index = index_bytes(
         2,
-        BTreeMap::from([("other".to_string(), repo_package(&other, "packages/other.json"))]),
+        BTreeMap::from([(
+            "other".to_string(),
+            repo_package(&other, "packages/other.json"),
+        )]),
     );
     let fetcher = fetcher_with_index(&repo, index, "packages/other.json", other);
     let store = RepoCacheStore::new(temp.path());
@@ -301,7 +331,10 @@ fn not_modified_revalidates_cached_expiry_and_updates_last_fetched() {
 
     let outcome = engine.update_repo(&repo, later).unwrap();
     assert!(!outcome.changed);
-    assert_eq!(store.current_snapshot_id("official").unwrap().unwrap(), old_snapshot);
+    assert_eq!(
+        store.current_snapshot_id("official").unwrap().unwrap(),
+        old_snapshot
+    );
     assert_eq!(
         store.read_state("official").unwrap().unwrap().last_fetched,
         later.now
@@ -316,7 +349,10 @@ fn rekor_time_uses_current_manifest_integrated_time() {
     let tool = package_bytes("tool", "1.1.0");
     let index = index_bytes(
         2,
-        BTreeMap::from([("tool".to_string(), repo_package(&tool, "packages/tool.json"))]),
+        BTreeMap::from([(
+            "tool".to_string(),
+            repo_package(&tool, "packages/tool.json"),
+        )]),
     );
     let fetcher = fetcher_with_index(&repo, index, "packages/tool.json", tool);
     let engine = UpdateEngine {
@@ -339,7 +375,10 @@ fn url_only_change_keeps_rollback_protection() {
     let tool = package_bytes("tool", "1.0.1");
     let index = index_bytes(
         4,
-        BTreeMap::from([("tool".to_string(), repo_package(&tool, "packages/tool.json"))]),
+        BTreeMap::from([(
+            "tool".to_string(),
+            repo_package(&tool, "packages/tool.json"),
+        )]),
     );
     let fetcher = fetcher_with_index(&new_repo, index, "packages/tool.json", tool);
     let engine = UpdateEngine {
@@ -358,8 +397,14 @@ fn signing_identity_change_resets_rollback_protection() {
     let temp = tempdir().unwrap();
     let mut old_repo = repo("file:///repo/");
     old_repo.signing.subject = "old".to_string();
-    update_one_with_verifier(&temp, &old_repo, verifier_for("old", "issuer", now()), 5, "1.0.0")
-        .unwrap();
+    update_one_with_verifier(
+        &temp,
+        &old_repo,
+        verifier_for("old", "issuer", now()),
+        5,
+        "1.0.0",
+    )
+    .unwrap();
 
     let new_repo = repo("file:///repo/");
     update_one(&temp, &new_repo, 1, "1.0.1").unwrap();
@@ -378,7 +423,8 @@ fn failed_update_preserves_previous_current_snapshot() {
     let old = store.current_snapshot_id("official").unwrap().unwrap();
     let tool = package_bytes("tool", "1.1.0");
     let mut bad_entry = repo_package(&tool, "packages/tool.json");
-    bad_entry.sha256 = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string();
+    bad_entry.sha256 =
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string();
     let index = index_bytes(2, BTreeMap::from([("tool".to_string(), bad_entry)]));
     let fetcher = fetcher_with_index(&repo, index, "packages/tool.json", tool);
     let engine = UpdateEngine {
@@ -399,7 +445,10 @@ fn retried_same_index_version_after_abandoned_staging_does_not_collide() {
     let tool = package_bytes("tool", "1.0.0");
     let index = index_bytes(
         1,
-        BTreeMap::from([("tool".to_string(), repo_package(&tool, "packages/tool.json"))]),
+        BTreeMap::from([(
+            "tool".to_string(),
+            repo_package(&tool, "packages/tool.json"),
+        )]),
     );
     let orphan = RepoCacheStore::snapshot_id(now(), 1, &index);
     fs::create_dir_all(temp.path().join("official/snapshots").join(orphan)).unwrap();
@@ -487,7 +536,10 @@ fn absolute_package_url_does_not_inherit_cross_origin_credentials() {
     );
     let fetcher = RecordingFetcher::new(vec![
         (repo.url.join("index.json").unwrap(), index),
-        (repo.url.join("index.json.bundle").unwrap(), b"bundle".to_vec()),
+        (
+            repo.url.join("index.json.bundle").unwrap(),
+            b"bundle".to_vec(),
+        ),
         (Url::parse(absolute).unwrap(), tool),
     ]);
     let seen = fetcher.seen.clone();
@@ -500,9 +552,9 @@ fn absolute_package_url_does_not_inherit_cross_origin_credentials() {
 
     engine.update_repo(&repo, options()).unwrap();
     let seen = seen.borrow();
-    assert!(seen.iter().any(|(url, origin)| {
-        url.as_str() == absolute && origin.is_none()
-    }));
+    assert!(seen
+        .iter()
+        .any(|(url, origin)| { url.as_str() == absolute && origin.is_none() }));
 }
 
 fn update_one(
@@ -524,7 +576,10 @@ fn update_one_with_verifier(
     let tool = package_bytes("tool", package_version);
     let index = index_bytes(
         version,
-        BTreeMap::from([("tool".to_string(), repo_package(&tool, "packages/tool.json"))]),
+        BTreeMap::from([(
+            "tool".to_string(),
+            repo_package(&tool, "packages/tool.json"),
+        )]),
     );
     let fetcher = fetcher_with_index(repo, index, "packages/tool.json", tool);
     let engine = UpdateEngine {
@@ -564,10 +619,9 @@ impl RecordingFetcher {
 
 impl RepoFetcher for RecordingFetcher {
     fn fetch(&self, request: FetchRequest<'_>) -> yurt_pkg_repo::fetch::Result<FetchResponse> {
-        self.seen.borrow_mut().push((
-            request.url.clone(),
-            request.credential_origin.cloned(),
-        ));
+        self.seen
+            .borrow_mut()
+            .push((request.url.clone(), request.credential_origin.cloned()));
         let body = self
             .entries
             .get(request.url)

@@ -118,7 +118,9 @@ impl RepoCacheStore {
         let Some(snapshot_id) = self.current_snapshot_id(repo_id)? else {
             return Ok(None);
         };
-        let path = self.snapshot_dir(repo_id, &snapshot_id).join("manifest.json");
+        let path = self
+            .snapshot_dir(repo_id, &snapshot_id)
+            .join("manifest.json");
         read_json(&path).map(Some)
     }
 
@@ -136,11 +138,7 @@ impl RepoCacheStore {
             path: repo_dir.clone(),
             source,
         })?;
-        let suffix = format!(
-            "{}-{}",
-            state.current_snapshot,
-            std::process::id()
-        );
+        let suffix = format!("{}-{}", state.current_snapshot, std::process::id());
         let tmp_path = repo_dir.join(format!("state.json.tmp-{suffix}"));
         let path = repo_dir.join("state.json");
         let bytes = serde_json::to_vec_pretty(state).map_err(|source| Error::Json {
@@ -331,7 +329,9 @@ mod tests {
         });
 
         attempted_rx.recv().unwrap();
-        assert!(acquired_rx.recv_timeout(Duration::from_millis(100)).is_err());
+        assert!(acquired_rx
+            .recv_timeout(Duration::from_millis(100))
+            .is_err());
         drop(shared);
         acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         handle.join().unwrap();

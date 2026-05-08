@@ -31,10 +31,7 @@ pub struct FetchRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchResponse {
     NotModified,
-    Modified {
-        body: Vec<u8>,
-        etag: Option<String>,
-    },
+    Modified { body: Vec<u8>, etag: Option<String> },
 }
 
 pub trait RepoFetcher {

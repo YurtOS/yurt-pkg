@@ -133,8 +133,11 @@ mod tests {
 
     #[test]
     fn manifest_serializes_trust_binding_without_priority() {
-        let manifest =
-            SnapshotManifest::from_verified_index(&trusted(), &index(), &verification("subject", "issuer"));
+        let manifest = SnapshotManifest::from_verified_index(
+            &trusted(),
+            &index(),
+            &verification("subject", "issuer"),
+        );
         let json = serde_json::to_string(&manifest).unwrap();
         assert!(json.contains("subject"));
         assert!(json.contains("issuer"));
@@ -157,8 +160,11 @@ mod tests {
 
     #[test]
     fn url_only_change_keeps_security_state_but_suppresses_fetch_reuse() {
-        let manifest =
-            SnapshotManifest::from_verified_index(&trusted(), &index(), &verification("subject", "issuer"));
+        let manifest = SnapshotManifest::from_verified_index(
+            &trusted(),
+            &index(),
+            &verification("subject", "issuer"),
+        );
         let mut changed = trusted();
         changed.url = Url::parse("https://mirror.example/repo").unwrap();
         assert_eq!(manifest.trust_change(&changed), TrustChange::UrlOnly);
@@ -166,8 +172,11 @@ mod tests {
 
     #[test]
     fn priority_only_change_is_not_a_cache_binding_change() {
-        let manifest =
-            SnapshotManifest::from_verified_index(&trusted(), &index(), &verification("subject", "issuer"));
+        let manifest = SnapshotManifest::from_verified_index(
+            &trusted(),
+            &index(),
+            &verification("subject", "issuer"),
+        );
         let mut changed = trusted();
         changed.priority = -10;
         assert_eq!(manifest.trust_change(&changed), TrustChange::Unchanged);

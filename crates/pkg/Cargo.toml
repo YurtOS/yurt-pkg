@@ -19,3 +19,6 @@ test-fixtures = ["yurt-pkg-repo/test-fixtures"]
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }

@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::OffsetDateTime;
 use url::Url;
-use yurt_pkg_trust::{TrustedRepo, TrustRoot};
+use yurt_pkg_trust::{TrustRoot, TrustedRepo};
 
 use crate::fetch::{FetchRequest, FetchResponse, RepoFetcher};
 use crate::metadata::{Freshness, Index, PackageFile, RepoPackage};
@@ -107,7 +107,8 @@ where
         options: UpdateOptions,
     ) -> Result<RepoUpdateOutcome> {
         let _lock = self.cache_store.lock(&repo.id, LockMode::Exclusive)?;
-        self.cache_store.repair_state_if_needed(&repo.id, options.now)?;
+        self.cache_store
+            .repair_state_if_needed(&repo.id, options.now)?;
         let result = self.update_repo_locked(repo, options);
         if result.is_err() {
             self.increment_failure_count(repo, options.now)?;
@@ -129,9 +130,10 @@ where
         let can_reuse_fetch = matches!(trust_change, Some(TrustChange::Unchanged));
         let can_reuse_packages = can_reuse_fetch;
         let enforce_baseline = !matches!(trust_change, Some(TrustChange::SigningIdentity));
-        let index_url = repo.url.join("index.json").map_err(|source| {
-            crate::metadata::Error::InvalidUrl(repo.id.clone(), source)
-        })?;
+        let index_url = repo
+            .url
+            .join("index.json")
+            .map_err(|source| crate::metadata::Error::InvalidUrl(repo.id.clone(), source))?;
         let index_response = self.fetcher.fetch(FetchRequest {
             url: &index_url,
             etag: state
@@ -174,9 +176,10 @@ where
             });
         };
 
-        let bundle_url = repo.url.join("index.json.bundle").map_err(|source| {
-            crate::metadata::Error::InvalidUrl(repo.id.clone(), source)
-        })?;
+        let bundle_url = repo
+            .url
+            .join("index.json.bundle")
+            .map_err(|source| crate::metadata::Error::InvalidUrl(repo.id.clone(), source))?;
         let bundle_response = self.fetcher.fetch(FetchRequest {
             url: &bundle_url,
             etag: state
