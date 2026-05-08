@@ -1,5 +1,6 @@
 /target
 .worktrees/
+.claude/settings.local.json
 **/*.rs.bk
 Cargo.lock.bak
 .DS_Store

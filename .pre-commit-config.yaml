@@ -1,0 +1,44 @@
+# yurt-pkg pre-commit config
+# Local hooks orchestrated by https://pre-commit.com.
+# Install: scripts/install-hooks.sh
+default_install_hook_types: [pre-commit, pre-push]
+fail_fast: false
+
+repos:
+  # Generic hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+
+  # Local hooks (no upstream repo for these tools)
+  - repo: local
+    hooks:
+      - id: cargo-fmt-check
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        types_or: [rust]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      - id: cargo-clippy-changed
+        name: cargo clippy (changed crates)
+        entry: scripts/lint-clippy-changed.sh
+        language: system
+        types_or: [rust]
+        pass_filenames: false
+        stages: [pre-commit]
+
+      # Pre-push only
+      - id: cargo-test-fast
+        name: cargo test (fast tier)
+        entry: cargo test --tests
+        language: system
+        types_or: [rust]
+        pass_filenames: false
+        stages: [pre-push]
