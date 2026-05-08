@@ -36,11 +36,22 @@ pub trait BundleVerifier {
     fn verify(&self, input: VerificationInput<'_>) -> Result<VerificationOutput>;
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NotImplementedVerifier;
+
+impl BundleVerifier for NotImplementedVerifier {
+    fn verify(&self, _input: VerificationInput<'_>) -> Result<VerificationOutput> {
+        Err(Error::NotImplemented)
+    }
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
 #[derive(Debug, Clone)]
 pub struct StaticVerifier {
     pub output: VerificationOutput,
 }
 
+#[cfg(any(test, feature = "test-fixtures"))]
 impl BundleVerifier for StaticVerifier {
     fn verify(&self, input: VerificationInput<'_>) -> Result<VerificationOutput> {
         if !input
