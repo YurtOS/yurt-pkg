@@ -13,6 +13,7 @@ use time::OffsetDateTime;
 use crate::state::{RepoState, SnapshotManifest};
 
 static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
+static STATE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -138,7 +139,12 @@ impl RepoCacheStore {
             path: repo_dir.clone(),
             source,
         })?;
-        let suffix = format!("{}-{}", state.current_snapshot, std::process::id());
+        let suffix = format!(
+            "{}-{}-{}",
+            state.current_snapshot,
+            std::process::id(),
+            STATE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
         let tmp_path = repo_dir.join(format!("state.json.tmp-{suffix}"));
         let path = repo_dir.join("state.json");
         let bytes = serde_json::to_vec_pretty(state).map_err(|source| Error::Json {

@@ -188,7 +188,7 @@ fn search(etc_root: &Path, cache_root: &Path, query: &str) -> Result<()> {
     for row in rows {
         let version = match (row.latest_version, row.latest_build) {
             (Some(version), Some(build)) => format!("{version}-{build}"),
-            _ => "yanked".to_string(),
+            _ => "unknown".to_string(),
         };
         println!("{} {} {}", row.name, version, row.repo_id);
     }
@@ -203,6 +203,9 @@ fn info(etc_root: &Path, cache_root: &Path, name: &str, repo_filter: Option<&str
         .indexes
         .info(name, repo_filter, &loaded.priorities)
         .context("failed to query package cache")?;
+    if results.is_empty() {
+        bail!("package '{name}' not found in local cache; run pkg update");
+    }
     for result in results {
         render_info(&result);
     }
@@ -241,10 +244,12 @@ fn load_query_indexes(trusted: &TrustedRepos, cache_root: &Path) -> Result<Loade
         };
         match manifest.trust_change(repo) {
             TrustChange::SigningIdentity => {
-                bail!(
+                eprintln!(
                     "trusted config for repo {} changed; run pkg update",
                     repo.id
                 );
+                locks.push(lock);
+                continue;
             }
             TrustChange::UrlOnly => {
                 eprintln!("repo {} URL changed; run pkg update to refresh it", repo.id);

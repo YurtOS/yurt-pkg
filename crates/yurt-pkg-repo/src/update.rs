@@ -62,6 +62,10 @@ pub enum Error {
         new_time: OffsetDateTime,
         cached_time: OffsetDateTime,
     },
+    #[error("staging directory already exists: {0}")]
+    StagingExists(PathBuf),
+    #[error("unsupported package entry url scheme: {0}")]
+    UnsupportedPackageUrlScheme(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -109,8 +113,9 @@ where
         let _lock = self.cache_store.lock(&repo.id, LockMode::Exclusive)?;
         self.cache_store
             .repair_state_if_needed(&repo.id, options.now)?;
-        let result = self.update_repo_locked(repo, options);
-        if result.is_err() {
+        let mut fetch_started = false;
+        let result = self.update_repo_locked(repo, options, &mut fetch_started);
+        if result.is_err() && fetch_started {
             self.increment_failure_count(repo, options.now)?;
         }
         result
@@ -120,6 +125,7 @@ where
         &self,
         repo: &TrustedRepo,
         options: UpdateOptions,
+        fetch_started: &mut bool,
     ) -> Result<RepoUpdateOutcome> {
         let state = self.cache_store.read_state(&repo.id)?;
         let current = self.read_current_snapshot(&repo.id)?;
@@ -134,6 +140,7 @@ where
             .url
             .join("index.json")
             .map_err(|source| crate::metadata::Error::InvalidUrl(repo.id.clone(), source))?;
+        *fetch_started = true;
         let index_response = self.fetcher.fetch(FetchRequest {
             url: &index_url,
             etag: state
@@ -224,10 +231,7 @@ where
             RepoCacheStore::snapshot_id(options.now, index.index_version, &index_bytes);
         let staging = self.cache_store.staging_dir(&repo.id, &snapshot_id);
         if staging.exists() {
-            fs::remove_dir_all(&staging).map_err(|source| Error::Io {
-                path: staging.clone(),
-                source,
-            })?;
+            return Err(Error::StagingExists(staging));
         }
         fs::create_dir_all(staging.join("packages")).map_err(|source| Error::Io {
             path: staging.join("packages"),
@@ -377,6 +381,9 @@ where
 
 pub fn resolve_package_url(base: &Url, entry: &RepoPackage) -> Result<Url> {
     if let Ok(url) = Url::parse(&entry.url) {
+        if !matches!(url.scheme(), "file" | "http" | "https") {
+            return Err(Error::UnsupportedPackageUrlScheme(url.scheme().to_string()));
+        }
         return Ok(url);
     }
     base.join(&entry.url)

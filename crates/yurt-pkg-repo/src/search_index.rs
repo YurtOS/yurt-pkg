@@ -101,7 +101,7 @@ impl RepoSearchIndex {
             indexed_package
                 .versions
                 .sort_by(|a, b| compare_versions(b, a));
-            let latest = latest_non_yanked(&indexed_package);
+            let latest = latest_version(&indexed_package);
             let package_json =
                 serde_json::to_string(&indexed_package).map_err(|source| Error::Json {
                     package: package.name.clone(),
@@ -116,9 +116,12 @@ impl RepoSearchIndex {
                 params![
                     repo_id,
                     package.name,
-                    latest.as_ref().map(|(version, _)| version.as_str()),
-                    latest.as_ref().map(|(_, build)| build.as_str()),
-                    latest.is_none() as i64,
+                    latest.as_ref().map(|(version, _, _)| version.as_str()),
+                    latest.as_ref().map(|(_, build, _)| build.as_str()),
+                    latest
+                        .as_ref()
+                        .map(|(_, _, yanked)| *yanked)
+                        .unwrap_or(false) as i64,
                     package_json,
                 ],
             )
@@ -261,6 +264,9 @@ impl SearchIndexes {
             let b_pri = trusted_priorities.get(&b.repo_id).copied().unwrap_or(0);
             a_pri.cmp(&b_pri).then_with(|| a.repo_id.cmp(&b.repo_id))
         });
+        if repo_filter.is_none() {
+            results.truncate(1);
+        }
         Ok(results)
     }
 }
@@ -284,15 +290,20 @@ fn row_precedes(
         .is_lt()
 }
 
-fn latest_non_yanked(package: &PackageFile) -> Option<(String, String)> {
-    package
+fn latest_version(package: &PackageFile) -> Option<(String, String, bool)> {
+    let latest_non_yanked = package
         .versions
         .iter()
         .filter(|version| !version.yanked)
-        .max_by(|a, b| compare_versions(a, b))
-        .map(|version| (version.version.clone(), version.build.clone()))
+        .max_by(|a, b| compare_versions(a, b));
+    let latest = latest_non_yanked.or_else(|| {
+        package
+            .versions
+            .iter()
+            .max_by(|a, b| compare_versions(a, b))
+    })?;
+    Some((latest.version.clone(), latest.build.clone(), latest.yanked))
 }
-
 fn compare_versions(
     a: &crate::metadata::PackageVersion,
     b: &crate::metadata::PackageVersion,
@@ -403,6 +414,50 @@ mod tests {
 
         let rows = indexes.search("tool", &priorities).unwrap();
         assert_eq!(rows[0].repo_id, "overlay");
+    }
+
+    #[test]
+    fn info_without_repo_filter_selects_current_priority_winner() {
+        let temp = tempdir().unwrap();
+        let official = RepoSearchIndex::rebuild(
+            temp.path().join("official.sqlite"),
+            "official",
+            &[package("tool", vec![version("1.0.0", "yurt_0", false)])],
+        )
+        .unwrap();
+        let overlay = RepoSearchIndex::rebuild(
+            temp.path().join("overlay.sqlite"),
+            "overlay",
+            &[package("tool", vec![version("2.0.0", "yurt_0", false)])],
+        )
+        .unwrap();
+        let indexes = SearchIndexes::new(vec![official, overlay]);
+        let priorities = BTreeMap::from([("official".to_string(), 10), ("overlay".to_string(), 0)]);
+
+        let results = indexes.info("tool", None, &priorities).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].repo_id, "overlay");
+    }
+
+    #[test]
+    fn all_yanked_package_uses_highest_yanked_as_latest() {
+        let temp = tempdir().unwrap();
+        let index = RepoSearchIndex::rebuild(
+            temp.path().join("db.sqlite"),
+            "official",
+            &[package(
+                "tool",
+                vec![
+                    version("1.0.0", "yurt_0", true),
+                    version("1.1.0", "yurt_0", true),
+                ],
+            )],
+        )
+        .unwrap();
+
+        let rows = index.search_local("tool").unwrap();
+        assert_eq!(rows[0].latest_version.as_deref(), Some("1.1.0"));
+        assert!(rows[0].latest_yanked);
     }
 
     #[test]

@@ -498,6 +498,38 @@ fn failed_fetch_increments_failure_count_and_success_resets_it() {
 }
 
 #[test]
+fn pre_fetch_cache_error_does_not_increment_failure_count() {
+    let temp = tempdir().unwrap();
+    let repo = repo("file:///repo/");
+    update_one(&temp, &repo, 1, "1.0.0").unwrap();
+    let store = RepoCacheStore::new(temp.path());
+    let snapshot = store.current_snapshot_id("official").unwrap().unwrap();
+    fs::write(
+        store
+            .snapshot_dir("official", &snapshot)
+            .join("manifest.json"),
+        b"not json",
+    )
+    .unwrap();
+    let engine = UpdateEngine {
+        fetcher: MemoryFetcher::default(),
+        verifier: verifier(),
+        trust_root: trust_root(),
+        cache_store: store.clone(),
+    };
+
+    assert!(engine.update_repo(&repo, options()).is_err());
+    assert_eq!(
+        store
+            .read_state("official")
+            .unwrap()
+            .unwrap()
+            .consecutive_fetch_failures,
+        0
+    );
+}
+
+#[test]
 fn current_snapshot_repair_clears_stale_etags() {
     let temp = tempdir().unwrap();
     let repo = repo("file:///repo/");

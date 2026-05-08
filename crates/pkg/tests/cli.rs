@@ -184,6 +184,80 @@ fn cli_info_refuses_signing_identity_change() {
 }
 
 #[test]
+fn cli_search_skips_repo_with_signing_identity_change_and_uses_other_repos() {
+    let fixture = RepoFixture::new();
+    fixture.populate_cache();
+    fixture.populate_cache_for("overlay", "subject", "issuer");
+    let repo_url = url::Url::from_directory_path(fixture.repo.path())
+        .unwrap()
+        .to_string();
+    write_trusted_entries(
+        &fixture.etc,
+        &[
+            ("official", &repo_url, "other-subject", "issuer", 10),
+            ("overlay", &repo_url, "subject", "issuer", 0),
+        ],
+    );
+    let mut cmd = Command::cargo_bin("pkg").unwrap();
+    cmd.args([
+        "--etc-root",
+        fixture.etc.path().to_str().unwrap(),
+        "--cache-root",
+        fixture.cache.path().to_str().unwrap(),
+        "search",
+        "tool",
+    ]);
+    cmd.assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "trusted config for repo official changed",
+        ))
+        .stdout(predicate::str::contains("tool"))
+        .stdout(predicate::str::contains("overlay"))
+        .stdout(predicate::str::contains("official").not());
+}
+
+#[test]
+fn cli_info_unknown_package_exits_nonzero_and_suggests_update() {
+    let fixture = RepoFixture::new();
+    fixture.populate_cache();
+    let mut cmd = Command::cargo_bin("pkg").unwrap();
+    cmd.args([
+        "--etc-root",
+        fixture.etc.path().to_str().unwrap(),
+        "--cache-root",
+        fixture.cache.path().to_str().unwrap(),
+        "info",
+        "missing",
+    ]);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("not found in local cache"))
+        .stderr(predicate::str::contains("run pkg update"));
+}
+
+#[test]
+fn cli_info_unknown_repo_filter_exits_nonzero_and_suggests_update() {
+    let fixture = RepoFixture::new();
+    fixture.populate_cache();
+    let mut cmd = Command::cargo_bin("pkg").unwrap();
+    cmd.args([
+        "--etc-root",
+        fixture.etc.path().to_str().unwrap(),
+        "--cache-root",
+        fixture.cache.path().to_str().unwrap(),
+        "info",
+        "tool",
+        "--repo",
+        "typo",
+    ]);
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("not found in local cache"))
+        .stderr(predicate::str::contains("run pkg update"));
+}
+
+#[test]
 fn cli_search_warns_on_stale_cache_and_failure_count() {
     let fixture = RepoFixture::new();
     fixture.populate_cache();
@@ -287,8 +361,12 @@ impl RepoFixture {
     }
 
     fn populate_cache(&self) {
+        self.populate_cache_for("official", "subject", "issuer");
+    }
+
+    fn populate_cache_for(&self, repo_id: &str, signing_subject: &str, signing_issuer: &str) {
         let store = RepoCacheStore::new(self.cache.path());
-        let staging = store.staging_dir("official", "fixture");
+        let staging = store.staging_dir(repo_id, "fixture");
         fs::create_dir_all(staging.join("packages")).unwrap();
         fs::copy(
             self.repo.path().join("index.json"),
@@ -311,12 +389,12 @@ impl RepoFixture {
             serde_json::from_slice(&fs::read(staging.join("packages/tool.json")).unwrap()).unwrap();
         let manifest = SnapshotManifest {
             schema: 1,
-            repo_id: "official".to_string(),
+            repo_id: repo_id.to_string(),
             repo_url: url::Url::from_directory_path(self.repo.path())
                 .unwrap()
                 .to_string(),
-            signing_subject: "subject".to_string(),
-            signing_issuer: "issuer".to_string(),
+            signing_subject: signing_subject.to_string(),
+            signing_issuer: signing_issuer.to_string(),
             index_version: index.index_version,
             integrated_time: datetime!(2026-05-08 00:00 UTC),
             expires_at: index.expires_at,
@@ -326,16 +404,16 @@ impl RepoFixture {
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
-        RepoSearchIndex::rebuild(staging.join("db.sqlite"), "official", &[package]).unwrap();
+        RepoSearchIndex::rebuild(staging.join("db.sqlite"), repo_id, &[package]).unwrap();
         store
-            .commit_staging("official", &staging, "fixture-snapshot")
+            .commit_staging(repo_id, &staging, "fixture-snapshot")
             .unwrap();
         store
             .write_state(
-                "official",
+                repo_id,
                 &RepoState {
                     schema: 1,
-                    repo_id: "official".to_string(),
+                    repo_id: repo_id.to_string(),
                     current_snapshot: "fixture-snapshot".to_string(),
                     index_etag: None,
                     index_bundle_etag: None,
@@ -348,20 +426,24 @@ impl RepoFixture {
 }
 
 fn write_trusted_file(etc: &TempDir, url: &str, subject: &str, issuer: &str) {
-    fs::write(
-        etc.path().join("yurt-pkg/trusted-repos.toml"),
-        format!(
+    write_trusted_entries(etc, &[("official", url, subject, issuer, 0)]);
+}
+
+fn write_trusted_entries(etc: &TempDir, repos: &[(&str, &str, &str, &str, i64)]) {
+    let mut text = String::new();
+    for (id, url, subject, issuer, priority) in repos {
+        text.push_str(&format!(
             r#"
 [[repo]]
-id = "official"
+id = "{id}"
 url = "{url}"
 signing_subject = "{subject}"
 signing_issuer = "{issuer}"
-priority = 0
+priority = {priority}
 "#,
-        ),
-    )
-    .unwrap();
+        ));
+    }
+    fs::write(etc.path().join("yurt-pkg/trusted-repos.toml"), text).unwrap();
 }
 
 fn package_json() -> String {

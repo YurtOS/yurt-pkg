@@ -24,6 +24,8 @@ pub enum Error {
     InvalidPackageName(String),
     #[error("invalid package entry url for '{0}': {1}")]
     InvalidUrl(String, url::ParseError),
+    #[error("unsupported package entry url scheme for '{package}': {scheme}")]
+    UnsupportedUrlScheme { package: String, scheme: String },
     #[error("invalid package entry relative url for '{package}': {url}")]
     InvalidPackageRelativeUrl { package: String, url: String },
     #[error("invalid sha256 for '{0}'")]
@@ -107,7 +109,13 @@ pub struct RepoPackage {
 impl RepoPackage {
     fn validate(&self, name: &str) -> Result<()> {
         validate_sha256(name, &self.sha256)?;
-        if Url::parse(&self.url).is_ok() {
+        if let Ok(url) = Url::parse(&self.url) {
+            if !matches!(url.scheme(), "file" | "http" | "https") {
+                return Err(Error::UnsupportedUrlScheme {
+                    package: name.to_string(),
+                    scheme: url.scheme().to_string(),
+                });
+            }
             return Ok(());
         }
         if !self.url.starts_with('/') {
