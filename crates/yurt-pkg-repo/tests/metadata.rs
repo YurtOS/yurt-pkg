@@ -58,12 +58,12 @@ fn index_accepts_package_json_relative_urls() {
 }
 
 #[test]
-fn index_rejects_package_relative_urls_outside_packages_json_layout() {
+fn index_rejects_unsafe_package_relative_urls() {
     for url in [
         "/packages/foo.json",
         "packages/../foo.json",
         "packages/foo.txt",
-        "packages/foo/bar.json",
+        "packages//foo.json",
     ] {
         let json = format!(
             r#"{{
@@ -89,6 +89,50 @@ fn index_rejects_package_relative_urls_outside_packages_json_layout() {
             "expected {url} to be rejected"
         );
     }
+}
+
+#[test]
+fn index_rejects_unsupported_absolute_package_url_schemes() {
+    let json = r#"{
+      "schema": 1,
+      "index_version": 10,
+      "generated_at": "2026-05-07T12:00:00Z",
+      "expires_at": "2026-05-14T12:00:00Z",
+      "packages": {
+        "foo": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 123, "url": "mailto:foo@example.com"}
+      }
+    }"#;
+    let index: Index = serde_json::from_str(json).unwrap();
+    let now = OffsetDateTime::parse(
+        "2026-05-08T00:00:00Z",
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    assert!(index
+        .validate_against(None, now, Freshness::default())
+        .is_err());
+}
+
+#[test]
+fn index_accepts_safe_noncanonical_relative_package_urls() {
+    let json = r#"{
+      "schema": 1,
+      "index_version": 10,
+      "generated_at": "2026-05-07T12:00:00Z",
+      "expires_at": "2026-05-14T12:00:00Z",
+      "packages": {
+        "foo": {"sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "size": 123, "url": "pkg/foo-v1.json"}
+      }
+    }"#;
+    let index: Index = serde_json::from_str(json).unwrap();
+    let now = OffsetDateTime::parse(
+        "2026-05-08T00:00:00Z",
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+    index
+        .validate_against(None, now, Freshness::default())
+        .unwrap();
 }
 
 #[test]

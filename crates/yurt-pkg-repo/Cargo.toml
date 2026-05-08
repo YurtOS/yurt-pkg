@@ -6,7 +6,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+fs2 = { workspace = true }
 hex = { workspace = true }
+rusqlite = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -16,6 +18,9 @@ time = { workspace = true }
 url = { workspace = true }
 yurt-pkg-format = { path = "../yurt-pkg-format" }
 yurt-pkg-trust = { path = "../yurt-pkg-trust" }
+
+[features]
+test-fixtures = []
 
 [dev-dependencies]
 tempfile = { workspace = true }

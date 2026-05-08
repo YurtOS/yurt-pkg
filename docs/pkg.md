@@ -1,8 +1,9 @@
 # `pkg` Command
 
-`pkg` is the in-sandbox package client for Yurt. This PR adds the command
-surface and the shared metadata/trust crates it will use, but most executable
-behavior is intentionally deferred to follow-up specs.
+`pkg` is the in-sandbox package client for Yurt. It can refresh trusted
+repository metadata into a local cache and answer offline search/info queries.
+Package installation and installed-state mutation are still deferred to the
+resolver/installer spec.
 
 ## Command Surface
 
@@ -45,19 +46,30 @@ signing_issuer  = "https://token.actions.githubusercontent.com"
 Both subject and issuer must match signed repository metadata and package
 artifacts. Yurt does not pin per-package public keys.
 
+## Repository Cache
+
+`pkg update` reads `/etc/yurt-pkg/trusted-repos.toml`, verifies each trusted
+repository's signed `index.json`, fetches package metadata JSON files, and
+commits an immutable cache snapshot under:
+
+```text
+/var/cache/yurt-pkg/repos/<repo-id>/
+```
+
+`pkg search` and `pkg info` read only this local cache. They do not touch the
+network. If a cache is stale or the previous update failed, they print warnings
+while still rendering usable cached metadata. If no cache exists, they exit
+nonzero and suggest running `pkg update`.
+
+`pkg info <name> --repo <id>` limits output to one trusted repository.
+
 ## Deferred Behavior
 
 Current stubs fail with explicit messages for behavior not implemented in this
 slice:
 
-- `pkg update`, `pkg search`, and `pkg info` are owned by
-  `docs/superpowers/specs/2026-05-07-yurt-pkg-update-flow-design.md`.
 - `pkg install`, `pkg upgrade`, `pkg remove`, and `pkg list` are owned by
   `docs/superpowers/specs/2026-05-07-yurt-pkg-resolver-installer-design.md`.
-
-The update-flow spec owns HTTP fetching, 304 freshness revalidation,
-`meta.json` persistence, rollback checks against persisted
-`last_index_version`, and `db.sqlite` cache writes.
 
 The resolver/installer spec owns dependency solving, yanked-version behavior,
 install transactions, installed-state mutation, and atomic filesystem updates.

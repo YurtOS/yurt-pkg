@@ -33,3 +33,5 @@ time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-w
 url = { version = "2", features = ["serde"] }
 assert_cmd = "2"
 predicates = "3"
+fs2 = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
