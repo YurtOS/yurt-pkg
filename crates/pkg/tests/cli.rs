@@ -163,9 +163,9 @@ fn cli_info_refuses_signing_identity_change() {
     let fixture = RepoFixture::new();
     fixture.populate_cache();
     fixture.write_trusted(
-        &url::Url::from_directory_path(fixture.repo.path())
+        url::Url::from_directory_path(fixture.repo.path())
             .unwrap()
-            .to_string(),
+            .as_ref(),
         "other-subject",
         "issuer",
     );
@@ -309,9 +309,7 @@ impl RepoFixture {
         fs::create_dir_all(etc.path().join("yurt-pkg/sigstore-trust-root")).unwrap();
         write_trusted_file(
             &etc,
-            &url::Url::from_directory_path(repo.path())
-                .unwrap()
-                .to_string(),
+            url::Url::from_directory_path(repo.path()).unwrap().as_ref(),
             "subject",
             "issuer",
         );

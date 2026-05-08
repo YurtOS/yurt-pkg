@@ -77,6 +77,7 @@ impl RepoCacheStore {
         let lock_path = repo_dir.join(".lock");
         let file = File::options()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)
