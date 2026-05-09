@@ -53,6 +53,12 @@ enum Command {
         #[arg(long)]
         reject_existing: bool,
     },
+    AssertNotPublished {
+        #[arg(long)]
+        repo_root: PathBuf,
+        #[arg(long)]
+        manifest: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -77,6 +83,10 @@ fn main() -> Result<()> {
             generated_at.as_deref(),
             reject_existing,
         ),
+        Command::AssertNotPublished {
+            repo_root,
+            manifest,
+        } => assert_not_published(&repo_root, &manifest),
     }
 }
 
@@ -100,6 +110,21 @@ fn lint_recipe(path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn assert_not_published(repo_root: &Path, manifest_path: &Path) -> Result<()> {
+    let manifest = read_pack_manifest(manifest_path)?;
+    validate_package_name(&manifest.name).map_err(|err| anyhow!(err))?;
+    semver::Version::parse(&manifest.version)
+        .with_context(|| format!("invalid package version '{}'", manifest.version))?;
+    let package_path = repo_root
+        .join("packages")
+        .join(format!("{}.json", manifest.name));
+    if !package_path.is_file() {
+        return Ok(());
+    }
+    let package = read_package_file(&package_path)?;
+    ensure_version_absent(&package, &manifest)
+}
+
 fn publish_local(
     repo_root: &Path,
     artifact: &Path,
@@ -107,10 +132,7 @@ fn publish_local(
     generated_at: Option<&str>,
     reject_existing: bool,
 ) -> Result<()> {
-    let manifest_text = fs::read_to_string(manifest_path)
-        .with_context(|| format!("reading {}", manifest_path.display()))?;
-    let manifest: PackManifest =
-        toml::from_str(&manifest_text).context("parsing yurt-pack TOML")?;
+    let manifest = read_pack_manifest(manifest_path)?;
     validate_package_name(&manifest.name).map_err(|err| anyhow!(err))?;
     semver::Version::parse(&manifest.version)
         .with_context(|| format!("invalid package version '{}'", manifest.version))?;
@@ -136,10 +158,7 @@ fn publish_local(
         .join("packages")
         .join(format!("{}.json", manifest.name));
     let mut package = if package_path.is_file() {
-        let text = fs::read_to_string(&package_path)
-            .with_context(|| format!("reading {}", package_path.display()))?;
-        serde_json::from_str::<PackageFile>(&text)
-            .with_context(|| format!("parsing {}", package_path.display()))?
+        read_package_file(&package_path)?
     } else {
         PackageFile {
             name: manifest.name.clone(),
@@ -153,17 +172,8 @@ fn publish_local(
             package.name
         );
     }
-    if reject_existing
-        && package.versions.iter().any(|existing| {
-            existing.version == manifest.version && existing.build == manifest.build
-        })
-    {
-        bail!(
-            "{} {}-{} is already published",
-            manifest.name,
-            manifest.version,
-            manifest.build
-        );
+    if reject_existing {
+        ensure_version_absent(&package, &manifest)?;
     }
 
     let artifact_bytes =
@@ -283,6 +293,34 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(value).context("serializing JSON")?;
     bytes.push(b'\n');
     fs::write(path, bytes).with_context(|| format!("writing {}", path.display()))
+}
+
+fn read_pack_manifest(path: &Path) -> Result<PackManifest> {
+    let manifest_text =
+        fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    toml::from_str(&manifest_text).context("parsing yurt-pack TOML")
+}
+
+fn read_package_file(path: &Path) -> Result<PackageFile> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str::<PackageFile>(&text)
+        .with_context(|| format!("parsing {}", path.display()))
+}
+
+fn ensure_version_absent(package: &PackageFile, manifest: &PackManifest) -> Result<()> {
+    if package
+        .versions
+        .iter()
+        .any(|existing| existing.version == manifest.version && existing.build == manifest.build)
+    {
+        bail!(
+            "{} {}-{} is already published",
+            manifest.name,
+            manifest.version,
+            manifest.build
+        );
+    }
+    Ok(())
 }
 
 fn lint_continuity(
