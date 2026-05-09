@@ -12,6 +12,8 @@ use yurt_pkg_repo::store::{LockMode, RepoCacheStore, RepoLock};
 use yurt_pkg_repo::update::{UpdateEngine, UpdateOptions};
 use yurt_pkg_trust::{TrustRoot, TrustedRepo, TrustedRepos};
 
+mod spec;
+
 #[derive(Debug, Parser)]
 #[command(name = "pkg", about = "Yurt package client", version)]
 struct Cli {
@@ -70,7 +72,11 @@ fn main() -> Result<()> {
         }
         // TODO(docs/superpowers/specs/2026-05-07-yurt-pkg-resolver-installer-design.md):
         // implement dependency resolution, install planning, and atomic state updates.
-        Command::Install { .. } | Command::Upgrade { .. } => {
+        Command::Install { spec } => {
+            let _ = spec::PackageSpec::parse(&spec)?;
+            bail!("install and upgrade planning are deferred to the resolver/installer spec")
+        }
+        Command::Upgrade { .. } => {
             bail!("install and upgrade planning are deferred to the resolver/installer spec")
         }
         // TODO(docs/superpowers/specs/2026-05-07-yurt-pkg-resolver-installer-design.md):

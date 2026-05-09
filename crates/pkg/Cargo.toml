@@ -8,8 +8,10 @@ repository.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+semver = { workspace = true }
 time = { workspace = true }
 url = { workspace = true }
+yurt-pkg-format = { path = "../yurt-pkg-format" }
 yurt-pkg-repo = { path = "../yurt-pkg-repo" }
 yurt-pkg-trust = { path = "../yurt-pkg-trust" }
 

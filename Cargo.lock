@@ -660,11 +660,13 @@ dependencies = [
  "assert_cmd",
  "clap",
  "predicates",
+ "semver",
  "serde_json",
  "sha2",
  "tempfile",
  "time",
  "url",
+ "yurt-pkg-format",
  "yurt-pkg-repo",
  "yurt-pkg-trust",
 ]
