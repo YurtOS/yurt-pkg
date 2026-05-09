@@ -193,7 +193,7 @@ impl PackageVersion {
             package: package.to_string(),
             message: format!("invalid package version '{}': {err}", self.version),
         })?;
-        Url::parse(&self.url).map_err(|err| Error::InvalidUrl(package.to_string(), err))?;
+        validate_package_version_url(package, &self.url)?;
         validate_sha256(package, &self.sha256)?;
         for dep in &self.depends {
             dep.validate().map_err(|err| Error::InvalidDependency {
@@ -203,6 +203,31 @@ impl PackageVersion {
         }
         Ok(())
     }
+}
+
+fn validate_package_version_url(package: &str, url: &str) -> Result<()> {
+    if let Ok(url) = Url::parse(url) {
+        if !matches!(url.scheme(), "file" | "http" | "https") {
+            return Err(Error::UnsupportedUrlScheme {
+                package: package.to_string(),
+                scheme: url.scheme().to_string(),
+            });
+        }
+        return Ok(());
+    }
+    if url.is_empty()
+        || url
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || url.starts_with('/')
+        || !url.ends_with(".yurtpkg")
+    {
+        return Err(Error::InvalidPackageRelativeUrl {
+            package: package.to_string(),
+            url: url.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_sha256(name: &str, value: &str) -> Result<()> {
