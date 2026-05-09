@@ -50,6 +50,8 @@ enum Command {
         manifest: PathBuf,
         #[arg(long)]
         generated_at: Option<String>,
+        #[arg(long)]
+        reject_existing: bool,
     },
 }
 
@@ -67,7 +69,14 @@ fn main() -> Result<()> {
             artifact,
             manifest,
             generated_at,
-        } => publish_local(&repo_root, &artifact, &manifest, generated_at.as_deref()),
+            reject_existing,
+        } => publish_local(
+            &repo_root,
+            &artifact,
+            &manifest,
+            generated_at.as_deref(),
+            reject_existing,
+        ),
     }
 }
 
@@ -96,6 +105,7 @@ fn publish_local(
     artifact: &Path,
     manifest_path: &Path,
     generated_at: Option<&str>,
+    reject_existing: bool,
 ) -> Result<()> {
     let manifest_text = fs::read_to_string(manifest_path)
         .with_context(|| format!("reading {}", manifest_path.display()))?;
@@ -122,22 +132,6 @@ fn publish_local(
             .with_context(|| format!("parsing --generated-at {value}"))?,
         None => OffsetDateTime::now_utc(),
     };
-    let artifact_bytes =
-        fs::read(artifact).with_context(|| format!("reading {}", artifact.display()))?;
-    let artifact_sha256 = sha256_hex(&artifact_bytes);
-    let artifact_size = artifact_bytes.len() as u64;
-
-    let artifact_rel = format!(
-        "artifacts/{}/{}/{}",
-        manifest.name, manifest.version, artifact_name
-    );
-    let artifact_dst = repo_root.join(&artifact_rel);
-    if let Some(parent) = artifact_dst.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
-    fs::write(&artifact_dst, &artifact_bytes)
-        .with_context(|| format!("writing {}", artifact_dst.display()))?;
-
     let package_path = repo_root
         .join("packages")
         .join(format!("{}.json", manifest.name));
@@ -159,6 +153,34 @@ fn publish_local(
             package.name
         );
     }
+    if reject_existing
+        && package.versions.iter().any(|existing| {
+            existing.version == manifest.version && existing.build == manifest.build
+        })
+    {
+        bail!(
+            "{} {}-{} is already published",
+            manifest.name,
+            manifest.version,
+            manifest.build
+        );
+    }
+
+    let artifact_bytes =
+        fs::read(artifact).with_context(|| format!("reading {}", artifact.display()))?;
+    let artifact_sha256 = sha256_hex(&artifact_bytes);
+    let artifact_size = artifact_bytes.len() as u64;
+
+    let artifact_rel = format!(
+        "artifacts/{}/{}/{}",
+        manifest.name, manifest.version, artifact_name
+    );
+    let artifact_dst = repo_root.join(&artifact_rel);
+    if let Some(parent) = artifact_dst.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    fs::write(&artifact_dst, &artifact_bytes)
+        .with_context(|| format!("writing {}", artifact_dst.display()))?;
 
     let version = PackageVersion {
         name: None,

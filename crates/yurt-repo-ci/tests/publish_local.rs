@@ -72,3 +72,74 @@ libc = "^0.1"
         "artifacts/yurt-greet/0.1.0/yurt-greet-0.1.0-yurt_0.yurtpkg"
     );
 }
+
+#[test]
+fn publish_local_reject_existing_fails_before_mutating_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    let inputs = dir.path().join("inputs");
+    fs::create_dir_all(&inputs).unwrap();
+
+    let artifact = inputs.join("yurt-greet-0.1.0-yurt_0.yurtpkg");
+    fs::write(&artifact, b"fake package bytes").unwrap();
+    let manifest = inputs.join("yurt-pack.toml");
+    fs::write(
+        &manifest,
+        r#"
+name        = "yurt-greet"
+version     = "0.1.0"
+build       = "yurt_0"
+platform    = "wasm32-wasip1-yurt"
+summary     = "Greeting smoke package"
+license     = "Apache-2.0"
+default_uid = 0
+default_gid = 0
+"#,
+    )
+    .unwrap();
+
+    let mut first = Command::cargo_bin("yurt-repo-ci").unwrap();
+    first.args([
+        "publish-local",
+        "--repo-root",
+        repo.to_str().unwrap(),
+        "--artifact",
+        artifact.to_str().unwrap(),
+        "--manifest",
+        manifest.to_str().unwrap(),
+        "--generated-at",
+        "2026-05-09T00:00:00Z",
+    ]);
+    first.assert().success();
+
+    let index_before = fs::read(repo.join("index.json")).unwrap();
+    fs::write(&artifact, b"changed package bytes").unwrap();
+
+    let mut duplicate = Command::cargo_bin("yurt-repo-ci").unwrap();
+    duplicate.args([
+        "publish-local",
+        "--repo-root",
+        repo.to_str().unwrap(),
+        "--artifact",
+        artifact.to_str().unwrap(),
+        "--manifest",
+        manifest.to_str().unwrap(),
+        "--generated-at",
+        "2026-05-09T00:00:00Z",
+        "--reject-existing",
+    ]);
+    duplicate
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "yurt-greet 0.1.0-yurt_0 is already published",
+        ));
+
+    assert_eq!(fs::read(repo.join("index.json")).unwrap(), index_before);
+    let copied = repo
+        .join("artifacts")
+        .join("yurt-greet")
+        .join("0.1.0")
+        .join("yurt-greet-0.1.0-yurt_0.yurtpkg");
+    assert_eq!(fs::read(copied).unwrap(), b"fake package bytes");
+}
