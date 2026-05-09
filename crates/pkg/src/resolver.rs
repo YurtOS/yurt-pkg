@@ -5,6 +5,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use semver::{Version, VersionReq};
 use yurt_pkg_format::Depends;
 use yurt_pkg_repo::metadata::{PackageFile, PackageVersion};
+use yurt_pkg_trust::SigningIdentity;
 
 use crate::installed::InstalledPackage;
 use crate::spec::{yurt_build_number, PackageSpec};
@@ -24,6 +25,7 @@ pub struct PackageRecord {
     pub url: String,
     pub sha256: String,
     pub size: u64,
+    pub signing: SigningIdentity,
     pub depends: Vec<Depends>,
     pub yanked: bool,
 }
@@ -38,6 +40,10 @@ pub struct Resolver {
     universe: PackageUniverse,
     installed: BTreeMap<String, InstalledPackage>,
 }
+
+type SelectedPackages = BTreeMap<String, PackageRecord>;
+type ReusedPackages = BTreeMap<String, InstalledPackage>;
+type SolveOutput = Option<(SelectedPackages, ReusedPackages)>;
 
 #[derive(Debug, Default, Clone)]
 struct PackageRequirements {
@@ -110,6 +116,7 @@ fn record_from_version(
         url: version.url,
         sha256: version.sha256,
         size: version.size,
+        signing: version.signing,
         depends: version.depends,
         yanked: version.yanked,
     }
@@ -136,25 +143,9 @@ impl Resolver {
             }
         }
 
-        let mut selected = BTreeMap::new();
-        let mut reused = BTreeMap::new();
-        while let Some(name) = next_unresolved(&requirements, &selected, &reused) {
-            if let Some(installed) = self.installed.get(&name) {
-                ensure_installed_satisfies(installed, &requirements[&name])?;
-                for dep in &installed.dependencies {
-                    add_requirement(&mut requirements, dep)?;
-                }
-                reused.insert(name, installed.clone());
-                continue;
-            }
-            let candidate = self
-                .best_candidate(&name, &requirements[&name])
-                .with_context(|| format!("no candidate for {name} satisfies requirements"))?;
-            for dep in &candidate.depends {
-                add_requirement(&mut requirements, dep)?;
-            }
-            selected.insert(name, candidate);
-        }
+        let (selected, reused) = self
+            .solve(requirements, BTreeMap::new(), BTreeMap::new())?
+            .context("no install plan satisfies package requirements")?;
 
         for (name, package) in &selected {
             ensure_dependencies_satisfied(name, package, &selected, &reused)?;
@@ -171,18 +162,68 @@ impl Resolver {
         })
     }
 
-    fn best_candidate(
+    fn solve(
         &self,
-        name: &str,
-        requirements: &PackageRequirements,
-    ) -> Option<PackageRecord> {
-        self.universe
-            .records_by_name
-            .get(name)?
+        requirements: BTreeMap<String, PackageRequirements>,
+        selected: SelectedPackages,
+        reused: ReusedPackages,
+    ) -> Result<SolveOutput> {
+        if selected_still_satisfies(&selected, &requirements).is_none() {
+            return Ok(None);
+        }
+        for installed in reused.values() {
+            if !installed_satisfies(installed, &requirements[&installed.name])? {
+                return Ok(None);
+            }
+        }
+
+        let Some(name) = next_unresolved(&requirements, &selected, &reused) else {
+            return Ok(Some((selected, reused)));
+        };
+
+        if let Some(installed) = self.installed.get(&name) {
+            ensure_installed_satisfies(installed, &requirements[&name])?;
+            let mut requirements = requirements;
+            for dep in &installed.dependencies {
+                add_requirement(&mut requirements, dep)?;
+            }
+            let mut reused = reused;
+            reused.insert(name, installed.clone());
+            return self.solve(requirements, selected, reused);
+        }
+
+        let Some(candidates) = self.universe.records_by_name.get(&name) else {
+            return Ok(None);
+        };
+        for candidate in candidates
             .iter()
-            .find(|candidate| candidate_satisfies(candidate, requirements))
-            .cloned()
+            .filter(|candidate| candidate_satisfies(candidate, &requirements[&name]))
+        {
+            let mut next_requirements = requirements.clone();
+            for dep in &candidate.depends {
+                add_requirement(&mut next_requirements, dep)?;
+            }
+            let mut next_selected = selected.clone();
+            next_selected.insert(name.clone(), candidate.clone());
+            if let Some(solution) = self.solve(next_requirements, next_selected, reused.clone())? {
+                return Ok(Some(solution));
+            }
+        }
+
+        Ok(None)
     }
+}
+
+fn selected_still_satisfies(
+    selected: &BTreeMap<String, PackageRecord>,
+    requirements: &BTreeMap<String, PackageRequirements>,
+) -> Option<()> {
+    for (name, candidate) in selected {
+        if !candidate_satisfies(candidate, &requirements[name]) {
+            return None;
+        }
+    }
+    Some(())
 }
 
 fn next_unresolved(
@@ -214,9 +255,25 @@ fn ensure_installed_satisfies(
     installed: &InstalledPackage,
     requirements: &PackageRequirements,
 ) -> Result<()> {
+    if installed_satisfies(installed, requirements)? {
+        return Ok(());
+    }
+    bail!(
+        "installed {} {}-{} conflicts with required {}",
+        installed.name,
+        installed.version,
+        installed.build,
+        describe_requirements(requirements)
+    );
+}
+
+fn installed_satisfies(
+    installed: &InstalledPackage,
+    requirements: &PackageRequirements,
+) -> Result<bool> {
     let version = Version::parse(&installed.version)
         .with_context(|| format!("installed {} has invalid version", installed.name))?;
-    if requirements
+    Ok(!(requirements
         .exact_version
         .as_ref()
         .is_some_and(|exact| exact != &version)
@@ -224,17 +281,7 @@ fn ensure_installed_satisfies(
             .exact_build
             .as_ref()
             .is_some_and(|exact| exact != &installed.build)
-        || !requirements.reqs.iter().all(|req| req.matches(&version))
-    {
-        bail!(
-            "installed {} {}-{} conflicts with required {}",
-            installed.name,
-            installed.version,
-            installed.build,
-            describe_requirements(requirements)
-        );
-    }
-    Ok(())
+        || !requirements.reqs.iter().all(|req| req.matches(&version))))
 }
 
 fn candidate_satisfies(candidate: &PackageRecord, requirements: &PackageRequirements) -> bool {
@@ -372,6 +419,7 @@ mod tests {
     use crate::spec::PackageSpec;
     use std::collections::BTreeMap;
     use yurt_pkg_format::Depends;
+    use yurt_pkg_trust::SigningIdentity;
 
     #[test]
     fn chooses_highest_non_yanked_version_and_build() {
@@ -443,6 +491,46 @@ mod tests {
         assert!(err.contains("installed lib 1.0.0-yurt_0 conflicts"));
     }
 
+    #[test]
+    fn backtracks_when_later_dependency_invalidates_first_choice() {
+        let universe = PackageUniverse::from_records(vec![
+            record(
+                "official",
+                0,
+                "app",
+                "1.0.0",
+                "yurt_0",
+                false,
+                &[("lib", "^1")],
+            ),
+            record(
+                "official",
+                0,
+                "plugin",
+                "1.0.0",
+                "yurt_0",
+                false,
+                &[("lib", "<1.5")],
+            ),
+            record("official", 0, "lib", "1.9.0", "yurt_0", false, &[]),
+            record("official", 0, "lib", "1.4.0", "yurt_0", false, &[]),
+        ]);
+
+        let plan = Resolver::new(universe, BTreeMap::new())
+            .resolve(&[
+                PackageSpec::parse("app").unwrap(),
+                PackageSpec::parse("plugin").unwrap(),
+            ])
+            .unwrap();
+
+        let lib = plan
+            .to_install
+            .iter()
+            .find(|package| package.name == "lib")
+            .unwrap();
+        assert_eq!(lib.version, "1.4.0");
+    }
+
     fn record(
         repo_id: &str,
         priority: i64,
@@ -468,6 +556,10 @@ mod tests {
             url: format!("file:///tmp/{name}-{version}-{build}.yurtpkg"),
             sha256: "a".repeat(64),
             size: 1,
+            signing: SigningIdentity {
+                subject: "subject".to_string(),
+                issuer: "issuer".to_string(),
+            },
             depends,
             yanked,
         }

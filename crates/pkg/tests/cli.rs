@@ -61,7 +61,7 @@ fn cli_install_file_backed_package_and_list_it() {
     let root = tempdir().unwrap();
     let state = tempdir().unwrap();
 
-    let mut install = Command::cargo_bin("pkg").unwrap();
+    let mut install = feature_pkg_cmd();
     install.args([
         "--etc-root",
         fixture.etc.path().to_str().unwrap(),
@@ -97,6 +97,32 @@ fn cli_install_file_backed_package_and_list_it() {
 }
 
 #[test]
+fn cli_install_without_test_fixture_verifier_fails_closed() {
+    let fixture = RepoFixture::new_with_archive_package();
+    fixture.populate_cache();
+    let root = tempdir().unwrap();
+    let state = tempdir().unwrap();
+
+    let mut cmd = plain_pkg_cmd();
+    cmd.args([
+        "--etc-root",
+        fixture.etc.path().to_str().unwrap(),
+        "--cache-root",
+        fixture.cache.path().to_str().unwrap(),
+        "--state-root",
+        state.path().to_str().unwrap(),
+        "--root",
+        root.path().to_str().unwrap(),
+        "install",
+        "tool",
+    ]);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("bundle verification is not wired"));
+}
+
+#[test]
 fn cli_install_exact_version_build_pin_selects_that_build() {
     let fixture = RepoFixture::new_with_archive_versions(&[
         ("tool", "1.0.0", "yurt_0", b"old\n".as_slice()),
@@ -106,7 +132,7 @@ fn cli_install_exact_version_build_pin_selects_that_build() {
     let root = tempdir().unwrap();
     let state = tempdir().unwrap();
 
-    let mut cmd = Command::cargo_bin("pkg").unwrap();
+    let mut cmd = feature_pkg_cmd();
     cmd.args([
         "--etc-root",
         fixture.etc.path().to_str().unwrap(),
@@ -133,7 +159,7 @@ fn cli_install_refuses_installed_version_change() {
     let root = tempdir().unwrap();
     let state = tempdir().unwrap();
 
-    let mut first = Command::cargo_bin("pkg").unwrap();
+    let mut first = feature_pkg_cmd();
     first.args([
         "--etc-root",
         fixture.etc.path().to_str().unwrap(),
@@ -148,7 +174,7 @@ fn cli_install_refuses_installed_version_change() {
     ]);
     first.assert().success();
 
-    let mut second = Command::cargo_bin("pkg").unwrap();
+    let mut second = feature_pkg_cmd();
     second.args([
         "--etc-root",
         fixture.etc.path().to_str().unwrap(),
@@ -175,7 +201,7 @@ fn cli_install_refuses_unmanaged_existing_path() {
     fs::create_dir_all(root.path().join("bin")).unwrap();
     fs::write(root.path().join("bin/tool"), b"local\n").unwrap();
 
-    let mut cmd = Command::cargo_bin("pkg").unwrap();
+    let mut cmd = feature_pkg_cmd();
     cmd.args([
         "--etc-root",
         fixture.etc.path().to_str().unwrap(),
@@ -202,7 +228,7 @@ fn cli_install_refuses_stale_cache_past_grace() {
     let root = tempdir().unwrap();
     let state = tempdir().unwrap();
 
-    let mut cmd = Command::cargo_bin("pkg").unwrap();
+    let mut cmd = feature_pkg_cmd();
     cmd.args([
         "--etc-root",
         fixture.etc.path().to_str().unwrap(),
@@ -546,7 +572,9 @@ impl RepoFixture {
             let path = format!("bin/{name}");
             let archive = archive_with_file(name, version, build, &path, content, depends);
             let artifact = format!("artifacts/{name}-{version}-{build}.yurtpkg");
-            fs::write(self.repo.path().join(&artifact), &archive).unwrap();
+            let artifact_path = self.repo.path().join(&artifact);
+            fs::write(&artifact_path, &archive).unwrap();
+            fs::write(artifact_path.with_extension("yurtpkg.bundle"), b"bundle").unwrap();
             version_entries.push(package_version_json(
                 version, build, &artifact, &archive, depends,
             ));
@@ -808,10 +836,16 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-#[cfg(feature = "test-fixtures")]
 fn feature_pkg_cmd() -> Command {
     let mut cmd = Command::new(env!("CARGO"));
     cmd.current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
     cmd.args(["run", "-p", "pkg", "--features", "test-fixtures", "--"]);
+    cmd
+}
+
+fn plain_pkg_cmd() -> Command {
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    cmd.args(["run", "-p", "pkg", "--"]);
     cmd
 }

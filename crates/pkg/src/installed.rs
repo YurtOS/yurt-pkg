@@ -1,14 +1,16 @@
 use std::collections::BTreeMap;
 use std::fs::File;
+use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension};
 use time::OffsetDateTime;
 use yurt_pkg_format::{Depends, FileEntry, FileEntryKind, FilesManifest};
 
 pub struct InstalledStore {
+    root: std::path::PathBuf,
     conn: Connection,
 }
 
@@ -57,7 +59,7 @@ impl InstalledStore {
         let conn = Connection::open(&db_path)
             .with_context(|| format!("failed to open {}", db_path.display()))?;
         init_schema(&conn).context("failed to initialize installed package database")?;
-        Ok(Self { conn })
+        Ok(Self { root, conn })
     }
 
     pub fn lock(root: impl AsRef<Path>) -> Result<InstallLock> {
@@ -77,50 +79,20 @@ impl InstalledStore {
         Ok(InstallLock { file })
     }
 
-    pub fn recover_prepared_transactions(&self, _sandbox_root: &Path) -> Result<()> {
+    pub fn recover_prepared_transactions(&self, sandbox_root: &Path) -> Result<()> {
         let txids = self.prepared_transaction_ids()?;
         for txid in txids {
-            self.conn
-                .execute_batch("BEGIN IMMEDIATE")
-                .context("failed to begin recovery transaction")?;
-            let result = (|| -> Result<()> {
-                self.conn
-                    .execute(
-                        "DELETE FROM files WHERE install_transaction_id = ?1",
-                        [&txid],
-                    )
-                    .context("failed to delete prepared file rows")?;
-                self.conn
-                    .execute(
-                        "DELETE FROM dependencies WHERE package_name IN (
-                           SELECT name FROM packages WHERE install_transaction_id = ?1
-                         )",
-                        [&txid],
-                    )
-                    .context("failed to delete prepared dependency rows")?;
-                self.conn
-                    .execute(
-                        "DELETE FROM packages WHERE install_transaction_id = ?1",
-                        [&txid],
-                    )
-                    .context("failed to delete prepared package rows")?;
-                self.conn
-                    .execute(
-                        "UPDATE transactions SET state = 'failed', error = ?2 WHERE id = ?1",
-                        params![txid, "prepared transaction staging is missing or corrupt"],
-                    )
-                    .context("failed to mark prepared transaction failed")?;
-                Ok(())
-            })();
-            match result {
-                Ok(()) => self
-                    .conn
-                    .execute_batch("COMMIT")
-                    .context("failed to commit recovery transaction")?,
-                Err(err) => {
-                    let _ = self.conn.execute_batch("ROLLBACK");
-                    return Err(err);
+            let staging_root = self.root.join("staging").join(&txid).join("root");
+            if staging_root.exists() {
+                self.copy_prepared_from_staging(&txid, &staging_root, sandbox_root)?;
+                self.mark_prepared_committed(&txid)?;
+                let staging_tx = self.root.join("staging").join(&txid);
+                if staging_tx.exists() {
+                    std::fs::remove_dir_all(&staging_tx)
+                        .with_context(|| format!("failed to remove {}", staging_tx.display()))?;
                 }
+            } else {
+                self.mark_prepared_failed(&txid)?;
             }
         }
         Ok(())
@@ -188,7 +160,56 @@ impl InstalledStore {
             .context("failed to query installed path owner")
     }
 
+    #[cfg(test)]
     pub fn commit_installed(&self, txid: &str, packages: &[InstalledPackageInput]) -> Result<()> {
+        self.insert_packages_with_state(txid, packages, "committed", "installed")
+    }
+
+    pub fn prepare_install(&self, txid: &str, packages: &[InstalledPackageInput]) -> Result<()> {
+        self.insert_packages_with_state(txid, packages, "prepared", "prepared")
+    }
+
+    pub fn mark_prepared_committed(&self, txid: &str) -> Result<()> {
+        let now = OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .context("failed to format install timestamp")?;
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .context("failed to begin installed-state commit transaction")?;
+        let result = (|| -> Result<()> {
+            self.conn
+                .execute(
+                    "UPDATE packages SET install_state = 'installed' WHERE install_transaction_id = ?1",
+                    [txid],
+                )
+                .context("failed to mark packages installed")?;
+            self.conn
+                .execute(
+                    "UPDATE transactions SET state = 'committed', committed_at = ?2, error = NULL WHERE id = ?1",
+                    params![txid, now],
+                )
+                .context("failed to mark transaction committed")?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self
+                .conn
+                .execute_batch("COMMIT")
+                .context("failed to commit installed-state commit transaction"),
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
+    fn insert_packages_with_state(
+        &self,
+        txid: &str,
+        packages: &[InstalledPackageInput],
+        transaction_state: &str,
+        install_state: &str,
+    ) -> Result<()> {
         let now = OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
             .context("failed to format install timestamp")?;
@@ -201,13 +222,13 @@ impl InstalledStore {
                     r#"
                     INSERT OR REPLACE INTO transactions
                     (id, state, created_at, committed_at, error)
-                    VALUES (?1, 'committed', ?2, ?2, NULL)
+                    VALUES (?1, ?2, ?3, CASE WHEN ?2 = 'committed' THEN ?3 ELSE NULL END, NULL)
                     "#,
-                    params![txid, now],
+                    params![txid, transaction_state, now],
                 )
                 .context("failed to insert install transaction row")?;
             for package in packages {
-                self.insert_package(txid, &now, package)?;
+                self.insert_package(txid, &now, install_state, package)?;
             }
             Ok(())
         })();
@@ -227,6 +248,7 @@ impl InstalledStore {
         &self,
         txid: &str,
         installed_at: &str,
+        install_state: &str,
         package: &InstalledPackageInput,
     ) -> Result<()> {
         let files_json = serde_json::to_string(&FilesManifest {
@@ -240,7 +262,7 @@ impl InstalledStore {
                 (name, version, build, repo_id, source_url, sha256, size,
                  installed_at, install_transaction_id, install_state,
                  index_json, files_json, yurt_json)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'installed', ?10, ?11, ?12)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                 "#,
                 params![
                     package.name,
@@ -252,6 +274,7 @@ impl InstalledStore {
                     package.size as i64,
                     installed_at,
                     txid,
+                    install_state,
                     package.index_json,
                     files_json,
                     package.yurt_json,
@@ -303,6 +326,75 @@ impl InstalledStore {
                     ],
                 )
                 .with_context(|| format!("failed to insert file owner for {}", file.path))?;
+        }
+        Ok(())
+    }
+
+    fn mark_prepared_failed(&self, txid: &str) -> Result<()> {
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .context("failed to begin recovery transaction")?;
+        let result = (|| -> Result<()> {
+            self.conn
+                .execute(
+                    "DELETE FROM files WHERE install_transaction_id = ?1",
+                    [txid],
+                )
+                .context("failed to delete prepared file rows")?;
+            self.conn
+                .execute(
+                    "DELETE FROM dependencies WHERE package_name IN (
+                       SELECT name FROM packages WHERE install_transaction_id = ?1
+                     )",
+                    [txid],
+                )
+                .context("failed to delete prepared dependency rows")?;
+            self.conn
+                .execute(
+                    "DELETE FROM packages WHERE install_transaction_id = ?1",
+                    [txid],
+                )
+                .context("failed to delete prepared package rows")?;
+            self.conn
+                .execute(
+                    "UPDATE transactions SET state = 'failed', error = ?2 WHERE id = ?1",
+                    params![txid, "prepared transaction staging is missing or corrupt"],
+                )
+                .context("failed to mark prepared transaction failed")?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => self
+                .conn
+                .execute_batch("COMMIT")
+                .context("failed to commit recovery transaction"),
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
+    fn copy_prepared_from_staging(
+        &self,
+        txid: &str,
+        staging_root: &Path,
+        sandbox_root: &Path,
+    ) -> Result<()> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT files_json FROM packages WHERE install_transaction_id = ?1")
+            .context("failed to prepare prepared package manifest query")?;
+        let rows = stmt
+            .query_map([txid], |row| row.get::<_, String>(0))
+            .context("failed to query prepared package manifests")?;
+        for row in rows {
+            let files_json = row.context("failed to read prepared package manifest row")?;
+            let manifest: FilesManifest =
+                serde_json::from_str(&files_json).context("failed to parse prepared files_json")?;
+            for file in manifest.files {
+                copy_staged_file(&file, staging_root, sandbox_root)?;
+            }
         }
         Ok(())
     }
@@ -466,6 +558,75 @@ fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn copy_staged_file(file: &FileEntry, staging_root: &Path, sandbox_root: &Path) -> Result<()> {
+    let source = staging_root.join(&file.path);
+    let destination = sandbox_root.join(&file.path);
+    match file.kind {
+        FileEntryKind::Dir => {
+            std::fs::create_dir_all(&destination)
+                .with_context(|| format!("failed to create {}", destination.display()))?;
+            set_mode(&destination, &file.mode)?;
+        }
+        FileEntryKind::File => {
+            ensure_parent(&destination)?;
+            std::fs::copy(&source, &destination).with_context(|| {
+                format!(
+                    "failed to recover {} from {}",
+                    destination.display(),
+                    source.display()
+                )
+            })?;
+            set_mode(&destination, &file.mode)?;
+        }
+        FileEntryKind::Symlink => {
+            ensure_parent(&destination)?;
+            remove_existing_link_path(&destination)?;
+            let target = std::fs::read_link(&source)
+                .with_context(|| format!("failed to read staged symlink {}", source.display()))?;
+            symlink(target, &destination)
+                .with_context(|| format!("failed to recover symlink {}", destination.display()))?;
+        }
+        FileEntryKind::Hardlink => {
+            ensure_parent(&destination)?;
+            remove_existing_link_path(&destination)?;
+            let target = file
+                .target
+                .as_ref()
+                .ok_or_else(|| anyhow!("hardlink {} missing target", file.path))?;
+            std::fs::hard_link(sandbox_root.join(target), &destination)
+                .with_context(|| format!("failed to recover hardlink {}", destination.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_parent(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    Ok(())
+}
+
+fn remove_existing_link_path(path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => std::fs::remove_file(path)
+            .with_context(|| format!("failed to replace {}", path.display()))?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(anyhow!(err).context(format!("failed to inspect {}", path.display())))
+        }
+    }
+    Ok(())
+}
+
+fn set_mode(path: &Path, mode: &str) -> Result<()> {
+    let mode = u32::from_str_radix(mode, 8)
+        .with_context(|| format!("failed to parse mode {mode} for {}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777))
+        .with_context(|| format!("failed to chmod {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +652,41 @@ mod tests {
 
         assert!(store.list_installed().unwrap().is_empty());
         assert!(store.path_owner("bin/foo").unwrap().is_none());
+    }
+
+    #[test]
+    fn recovery_completes_prepared_transaction_with_staging() {
+        let state = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let store = InstalledStore::open(state.path()).unwrap();
+        let txid = "tx1";
+        let files = vec![FileEntry {
+            path: "bin/foo".into(),
+            kind: FileEntryKind::File,
+            sha256: Some("a".repeat(64)),
+            size: Some(1),
+            target: None,
+            mode: "0755".into(),
+            uid: 0,
+            gid: 0,
+        }];
+        let package = InstalledPackageInput::new_for_test(
+            "foo",
+            "1.0.0",
+            "yurt_0",
+            files,
+            Vec::<Depends>::new(),
+        );
+        let staged = state.path().join("staging/tx1/root/bin");
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(staged.join("foo"), b"x").unwrap();
+        store.prepare_install(txid, &[package]).unwrap();
+
+        store.recover_prepared_transactions(root.path()).unwrap();
+
+        assert_eq!(std::fs::read(root.path().join("bin/foo")).unwrap(), b"x");
+        assert_eq!(store.list_installed().unwrap()[0].name, "foo");
+        assert_eq!(store.path_owner("bin/foo").unwrap().unwrap(), "foo");
     }
 
     #[test]

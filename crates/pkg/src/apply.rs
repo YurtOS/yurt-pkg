@@ -7,6 +7,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
 use yurt_pkg_format::{EntryKind, FileEntryKind, Reader};
 use yurt_pkg_repo::fetch::{FetchRequest, FetchResponse, LocalFileFetcher, RepoFetcher};
+#[cfg(not(any(test, feature = "test-fixtures")))]
+use yurt_pkg_repo::verify::{BundleVerifier, VerificationInput};
+#[cfg(not(any(test, feature = "test-fixtures")))]
+use yurt_pkg_trust::TrustRoot;
 
 use crate::installed::{InstalledPackageInput, InstalledStore};
 use crate::resolver::PackageRecord;
@@ -36,16 +40,18 @@ pub fn apply_plan(
         write_entries(&staging_root, &archive.reader)
             .with_context(|| format!("failed to stage {}", archive.package.name))?;
     }
+    let inputs = archives
+        .iter()
+        .map(installed_input)
+        .collect::<Result<Vec<_>>>()?;
+    store.prepare_install(&txid, &inputs)?;
+
     for archive in &archives {
         write_entries(root, &archive.reader)
             .with_context(|| format!("failed to install {}", archive.package.name))?;
     }
 
-    let inputs = archives
-        .iter()
-        .map(installed_input)
-        .collect::<Result<Vec<_>>>()?;
-    store.commit_installed(&txid, &inputs)?;
+    store.mark_prepared_committed(&txid)?;
     let staging_tx = state_root.join("staging").join(&txid);
     if staging_tx.exists() {
         fs::remove_dir_all(&staging_tx)
@@ -92,10 +98,73 @@ fn load_archive(package: &PackageRecord) -> Result<LoadedArchive<'_>> {
             package.build
         );
     }
+    let bundle = fetch_bundle(&url)?;
+    verify_bundle(package, &body, &bundle)?;
     let reader = Reader::read(body.as_slice())
         .with_context(|| format!("failed to read archive for {}", package.name))?;
     verify_archive_metadata(package, &reader)?;
     Ok(LoadedArchive { package, reader })
+}
+
+fn fetch_bundle(url: &url::Url) -> Result<Vec<u8>> {
+    let bundle_url = url::Url::parse(&format!("{url}.bundle"))
+        .with_context(|| format!("invalid archive bundle url for {url}"))?;
+    let response = LocalFileFetcher
+        .fetch(FetchRequest {
+            url: &bundle_url,
+            etag: None,
+            credential_origin: None,
+        })
+        .with_context(|| format!("failed to fetch {}", bundle_url))?;
+    let FetchResponse::Modified { body, .. } = response else {
+        bail!("bundle fetch for {bundle_url} unexpectedly returned not-modified");
+    };
+    Ok(body)
+}
+
+#[cfg(any(test, feature = "test-fixtures"))]
+fn verify_bundle(package: &PackageRecord, payload: &[u8], bundle: &[u8]) -> Result<()> {
+    let _ = payload;
+    if !cfg!(feature = "test-fixtures")
+        && std::env::var_os("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER").is_none()
+    {
+        bail!("bundle verification is not wired to sigstore yet");
+    }
+    if bundle.is_empty() {
+        bail!(
+            "archive signature verification failed for {} {}-{}",
+            package.name,
+            package.version,
+            package.build
+        );
+    }
+    if package.signing.subject.is_empty() || package.signing.issuer.is_empty() {
+        bail!(
+            "archive signature verification failed for {} {}-{}",
+            package.name,
+            package.version,
+            package.build
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(any(test, feature = "test-fixtures")))]
+fn verify_bundle(package: &PackageRecord, payload: &[u8], bundle: &[u8]) -> Result<()> {
+    yurt_pkg_repo::verify::NotImplementedVerifier
+        .verify(VerificationInput {
+            payload,
+            bundle,
+            expected_signing: &package.signing,
+            trust_root: &TrustRoot::from_dir("/etc/yurt-pkg/sigstore-trust-root"),
+        })
+        .with_context(|| {
+            format!(
+                "archive signature verification failed for {} {}-{}",
+                package.name, package.version, package.build
+            )
+        })?;
+    Ok(())
 }
 
 fn verify_archive_metadata(package: &PackageRecord, reader: &Reader) -> Result<()> {
@@ -288,9 +357,11 @@ mod tests {
     use sha2::{Digest, Sha256};
     use tempfile::{tempdir, TempDir};
     use yurt_pkg_format::{Depends, IndexManifest, Writer};
+    use yurt_pkg_trust::SigningIdentity;
 
     #[test]
     fn applies_archive_and_records_file_owner() {
+        std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
         let state = tempdir().unwrap();
         let root = tempdir().unwrap();
         let archive_dir = tempdir().unwrap();
@@ -314,6 +385,7 @@ mod tests {
 
     #[test]
     fn rejects_file_directory_collision() {
+        std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
         let state = tempdir().unwrap();
         let root = tempdir().unwrap();
         let archive_dir = tempdir().unwrap();
@@ -390,6 +462,7 @@ mod tests {
     ) -> PackageRecord {
         let path = dir.path().join(format!("{name}-{version}-{build}.yurtpkg"));
         std::fs::write(&path, &archive).unwrap();
+        std::fs::write(path.with_extension("yurtpkg.bundle"), b"bundle").unwrap();
         PackageRecord {
             repo_id: "official".to_string(),
             priority: 0,
@@ -399,6 +472,10 @@ mod tests {
             url: url::Url::from_file_path(&path).unwrap().to_string(),
             sha256: hex(&Sha256::digest(&archive)),
             size: archive.len() as u64,
+            signing: SigningIdentity {
+                subject: "subject".to_string(),
+                issuer: "issuer".to_string(),
+            },
             depends: Vec::new(),
             yanked: false,
         }
