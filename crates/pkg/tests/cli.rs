@@ -4,7 +4,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use tempfile::{tempdir, TempDir};
 use time::macros::datetime;
-use yurt_pkg_repo::metadata::{Index, PackageFile};
+use yurt_pkg_format::{IndexManifest, Writer};
+use yurt_pkg_repo::metadata::Index;
 use yurt_pkg_repo::search_index::RepoSearchIndex;
 use yurt_pkg_repo::state::{RepoState, SnapshotManifest};
 use yurt_pkg_repo::store::RepoCacheStore;
@@ -45,12 +46,205 @@ fn add_repo_requires_subject_and_issuer() {
 }
 
 #[test]
-fn install_reports_planner_boundary() {
+fn install_without_repo_config_reports_missing_trusted_repos() {
     let mut cmd = Command::cargo_bin("pkg").unwrap();
     cmd.args(["install", "foo"]);
     cmd.assert()
         .failure()
-        .stderr(predicate::str::contains("resolver/installer spec"));
+        .stderr(predicate::str::contains("trusted-repos.toml"));
+}
+
+#[test]
+fn cli_install_file_backed_package_and_list_it() {
+    let fixture = RepoFixture::new_with_archive_package();
+    fixture.populate_cache();
+    let root = tempdir().unwrap();
+    let state = tempdir().unwrap();
+
+    let mut install = feature_pkg_cmd();
+    install.args([
+        "--etc-root",
+        fixture.etc.path().to_str().unwrap(),
+        "--cache-root",
+        fixture.cache.path().to_str().unwrap(),
+        "--state-root",
+        state.path().to_str().unwrap(),
+        "--root",
+        root.path().to_str().unwrap(),
+        "install",
+        "tool",
+    ]);
+    install
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("install tool 1.0.0-yurt_0"));
+
+    assert_eq!(fs::read(root.path().join("bin/tool")).unwrap(), b"tool\n");
+
+    let mut list = Command::cargo_bin("pkg").unwrap();
+    list.args([
+        "--etc-root",
+        fixture.etc.path().to_str().unwrap(),
+        "--cache-root",
+        fixture.cache.path().to_str().unwrap(),
+        "--state-root",
+        state.path().to_str().unwrap(),
+        "list",
+    ]);
+    list.assert()
+        .success()
+        .stdout(predicate::str::contains("tool 1.0.0-yurt_0 official"));
+}
+
+#[test]
+fn cli_install_without_test_fixture_verifier_fails_closed() {
+    let fixture = RepoFixture::new_with_archive_package();
+    fixture.populate_cache();
+    let root = tempdir().unwrap();
+    let state = tempdir().unwrap();
+
+    let mut cmd = plain_pkg_cmd();
+    cmd.args([
+        "--etc-root",
+        fixture.etc.path().to_str().unwrap(),
+        "--cache-root",
+        fixture.cache.path().to_str().unwrap(),
+        "--state-root",
+        state.path().to_str().unwrap(),
+        "--root",
+        root.path().to_str().unwrap(),
+        "install",
+        "tool",
+    ]);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("bundle verification is not wired"));
+}
+
+#[test]
+fn cli_install_exact_version_build_pin_selects_that_build() {
+    let fixture = RepoFixture::new_with_archive_versions(&[
+        ("tool", "1.0.0", "yurt_0", b"old\n".as_slice()),
+        ("tool", "1.0.0", "yurt_1", b"new\n".as_slice()),
+    ]);
+    fixture.populate_cache();
+    let root = tempdir().unwrap();
+    let state = tempdir().unwrap();
+
+    let mut cmd = feature_pkg_cmd();
+    cmd.args([
+        "--etc-root",
+        fixture.etc.path().to_str().unwrap(),
+        "--cache-root",
+        fixture.cache.path().to_str().unwrap(),
+        "--state-root",
+        state.path().to_str().unwrap(),
+        "--root",
+        root.path().to_str().unwrap(),
+        "install",
+        "tool@1.0.0-yurt_0",
+    ]);
+
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("install tool 1.0.0-yurt_0"));
+    assert_eq!(fs::read(root.path().join("bin/tool")).unwrap(), b"old\n");
+}
+
+#[test]
+fn cli_install_refuses_installed_version_change() {
+    let fixture = RepoFixture::new_with_dependency_conflict();
+    fixture.populate_cache();
+    let root = tempdir().unwrap();
+    let state = tempdir().unwrap();
+
+    let mut first = feature_pkg_cmd();
+    first.args([
+        "--etc-root",
+        fixture.etc.path().to_str().unwrap(),
+        "--cache-root",
+        fixture.cache.path().to_str().unwrap(),
+        "--state-root",
+        state.path().to_str().unwrap(),
+        "--root",
+        root.path().to_str().unwrap(),
+        "install",
+        "lib@1.0.0-yurt_0",
+    ]);
+    first.assert().success();
+
+    let mut second = feature_pkg_cmd();
+    second.args([
+        "--etc-root",
+        fixture.etc.path().to_str().unwrap(),
+        "--cache-root",
+        fixture.cache.path().to_str().unwrap(),
+        "--state-root",
+        state.path().to_str().unwrap(),
+        "--root",
+        root.path().to_str().unwrap(),
+        "install",
+        "app",
+    ]);
+    second.assert().failure().stderr(predicate::str::contains(
+        "installed lib 1.0.0-yurt_0 conflicts",
+    ));
+}
+
+#[test]
+fn cli_install_refuses_unmanaged_existing_path() {
+    let fixture = RepoFixture::new_with_archive_package();
+    fixture.populate_cache();
+    let root = tempdir().unwrap();
+    let state = tempdir().unwrap();
+    fs::create_dir_all(root.path().join("bin")).unwrap();
+    fs::write(root.path().join("bin/tool"), b"local\n").unwrap();
+
+    let mut cmd = feature_pkg_cmd();
+    cmd.args([
+        "--etc-root",
+        fixture.etc.path().to_str().unwrap(),
+        "--cache-root",
+        fixture.cache.path().to_str().unwrap(),
+        "--state-root",
+        state.path().to_str().unwrap(),
+        "--root",
+        root.path().to_str().unwrap(),
+        "install",
+        "tool",
+    ]);
+
+    cmd.assert().failure().stderr(predicate::str::contains(
+        "would overwrite unmanaged path bin/tool",
+    ));
+}
+
+#[test]
+fn cli_install_refuses_stale_cache_past_grace() {
+    let fixture = RepoFixture::new_with_archive_package();
+    fixture.populate_cache();
+    fixture.make_cache_stale_with_failures();
+    let root = tempdir().unwrap();
+    let state = tempdir().unwrap();
+
+    let mut cmd = feature_pkg_cmd();
+    cmd.args([
+        "--etc-root",
+        fixture.etc.path().to_str().unwrap(),
+        "--cache-root",
+        fixture.cache.path().to_str().unwrap(),
+        "--state-root",
+        state.path().to_str().unwrap(),
+        "--root",
+        root.path().to_str().unwrap(),
+        "install",
+        "tool",
+    ]);
+
+    cmd.assert()
+        .failure()
+        .stderr(predicate::str::contains("cache is stale; run pkg update"));
 }
 
 #[cfg(feature = "test-fixtures")]
@@ -301,6 +495,8 @@ struct RepoFixture {
     repo: TempDir,
 }
 
+type ArchiveVersion<'a> = (&'a str, &'a str, &'a [u8], &'a [(&'a str, &'a str)]);
+
 impl RepoFixture {
     fn new() -> Self {
         let etc = tempdir().unwrap();
@@ -335,6 +531,101 @@ impl RepoFixture {
         .unwrap();
         fs::write(repo.path().join("index.json.bundle"), b"bundle").unwrap();
         Self { etc, cache, repo }
+    }
+
+    fn new_with_archive_package() -> Self {
+        let fixture = Self::new();
+        fixture.write_archive_package("tool", &[("1.0.0", "yurt_0", b"tool\n".as_slice(), &[])]);
+        fixture
+    }
+
+    fn new_with_archive_versions(versions: &[(&str, &str, &str, &[u8])]) -> Self {
+        let fixture = Self::new();
+        let converted = versions
+            .iter()
+            .map(|(_, version, build, content)| (*version, *build, *content, &[][..]))
+            .collect::<Vec<_>>();
+        fixture.write_archive_package("tool", &converted);
+        fixture
+    }
+
+    fn new_with_dependency_conflict() -> Self {
+        let fixture = Self::new();
+        fixture.write_archive_package(
+            "lib",
+            &[
+                ("1.0.0", "yurt_0", b"lib1\n".as_slice(), &[]),
+                ("2.0.0", "yurt_0", b"lib2\n".as_slice(), &[]),
+            ],
+        );
+        fixture.write_archive_package(
+            "app",
+            &[("1.0.0", "yurt_0", b"app\n".as_slice(), &[("lib", "^2")])],
+        );
+        fixture
+    }
+
+    fn write_archive_package(&self, name: &str, versions: &[ArchiveVersion<'_>]) {
+        fs::create_dir_all(self.repo.path().join("artifacts")).unwrap();
+        let mut version_entries = Vec::new();
+        for (version, build, content, depends) in versions {
+            let path = format!("bin/{name}");
+            let archive = archive_with_file(name, version, build, &path, content, depends);
+            let artifact = format!("artifacts/{name}-{version}-{build}.yurtpkg");
+            let artifact_path = self.repo.path().join(&artifact);
+            fs::write(&artifact_path, &archive).unwrap();
+            fs::write(artifact_path.with_extension("yurtpkg.bundle"), b"bundle").unwrap();
+            version_entries.push(package_version_json(
+                version, build, &artifact, &archive, depends,
+            ));
+        }
+        let package = format!(
+            r#"{{
+  "name": "{name}",
+  "versions": [{}]
+}}"#,
+            version_entries.join(",")
+        );
+        fs::write(
+            self.repo.path().join(format!("packages/{name}.json")),
+            package.as_bytes(),
+        )
+        .unwrap();
+        self.write_index_for_package_files();
+    }
+
+    fn write_index_for_package_files(&self) {
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(self.repo.path().join("packages")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let name = path.file_stem().unwrap().to_str().unwrap();
+            let bytes = fs::read(&path).unwrap();
+            entries.push(format!(
+                r#""{name}": {{"sha256": "{}", "size": {}, "url": "packages/{name}.json"}}"#,
+                hex(&Sha256::digest(&bytes)),
+                bytes.len()
+            ));
+        }
+        entries.sort();
+        fs::write(
+            self.repo.path().join("index.json"),
+            format!(
+                r#"{{
+  "schema": 1,
+  "index_version": 1,
+  "generated_at": "2026-05-08T00:00:00Z",
+  "expires_at": "2099-01-01T00:00:00Z",
+  "packages": {{
+    {}
+  }}
+}}"#,
+                entries.join(",\n    ")
+            ),
+        )
+        .unwrap();
     }
 
     fn write_trusted(&self, url: &str, subject: &str, issuer: &str) {
@@ -376,15 +667,25 @@ impl RepoFixture {
             staging.join("index.json.bundle"),
         )
         .unwrap();
-        fs::copy(
-            self.repo.path().join("packages/tool.json"),
-            staging.join("packages/tool.json"),
-        )
-        .unwrap();
+        for entry in fs::read_dir(self.repo.path().join("packages")).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().extension().and_then(|ext| ext.to_str()) == Some("json") {
+                fs::copy(
+                    entry.path(),
+                    staging.join("packages").join(entry.file_name()),
+                )
+                .unwrap();
+            }
+        }
         let index: Index =
             serde_json::from_slice(&fs::read(staging.join("index.json")).unwrap()).unwrap();
-        let package: PackageFile =
-            serde_json::from_slice(&fs::read(staging.join("packages/tool.json")).unwrap()).unwrap();
+        let mut packages = Vec::new();
+        for entry in fs::read_dir(staging.join("packages")).unwrap() {
+            let entry = entry.unwrap();
+            if entry.path().extension().and_then(|ext| ext.to_str()) == Some("json") {
+                packages.push(serde_json::from_slice(&fs::read(entry.path()).unwrap()).unwrap());
+            }
+        }
         let manifest = SnapshotManifest {
             schema: 1,
             repo_id: repo_id.to_string(),
@@ -402,7 +703,7 @@ impl RepoFixture {
             serde_json::to_vec_pretty(&manifest).unwrap(),
         )
         .unwrap();
-        RepoSearchIndex::rebuild(staging.join("db.sqlite"), repo_id, &[package]).unwrap();
+        RepoSearchIndex::rebuild(staging.join("db.sqlite"), repo_id, &packages).unwrap();
         store
             .commit_staging(repo_id, &staging, "fixture-snapshot")
             .unwrap();
@@ -421,6 +722,70 @@ impl RepoFixture {
             )
             .unwrap();
     }
+}
+
+fn archive_with_file(
+    name: &str,
+    version: &str,
+    build: &str,
+    path: &str,
+    content: &[u8],
+    depends: &[(&str, &str)],
+) -> Vec<u8> {
+    let mut writer = Writer::new(
+        IndexManifest {
+            schema_version: yurt_pkg_format::SCHEMA_VERSION,
+            name: name.to_string(),
+            version: version.to_string(),
+            build: build.to_string(),
+            platform: "wasm32-wasip1".to_string(),
+            summary: String::new(),
+            license: "Apache-2.0".to_string(),
+            depends: depends
+                .iter()
+                .map(|(name, req)| yurt_pkg_format::Depends {
+                    name: (*name).to_string(),
+                    req: (*req).to_string(),
+                })
+                .collect(),
+        },
+        None,
+    )
+    .unwrap();
+    writer
+        .add_file(path, content.to_vec(), 0o755, 0, 0)
+        .unwrap();
+    let mut archive = Vec::new();
+    writer.finish(&mut archive).unwrap();
+    archive
+}
+
+fn package_version_json(
+    version: &str,
+    build: &str,
+    artifact: &str,
+    archive: &[u8],
+    depends: &[(&str, &str)],
+) -> String {
+    let hash = hex(&Sha256::digest(archive));
+    let depends = depends
+        .iter()
+        .map(|(name, req)| format!(r#"{{"name": "{name}", "req": "{req}"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{
+    "version": "{version}",
+    "build": "{build}",
+    "url": "{artifact}",
+    "sha256": "{hash}",
+    "size": {},
+    "signing": {{"subject": "subject", "issuer": "issuer"}},
+    "depends": [{depends}],
+    "yanked": false
+  }}"#,
+        archive.len()
+    )
 }
 
 fn write_trusted_file(etc: &TempDir, url: &str, subject: &str, issuer: &str) {
@@ -471,10 +836,16 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-#[cfg(feature = "test-fixtures")]
 fn feature_pkg_cmd() -> Command {
     let mut cmd = Command::new(env!("CARGO"));
     cmd.current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
     cmd.args(["run", "-p", "pkg", "--features", "test-fixtures", "--"]);
+    cmd
+}
+
+fn plain_pkg_cmd() -> Command {
+    let mut cmd = Command::new(env!("CARGO"));
+    cmd.current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+    cmd.args(["run", "-p", "pkg", "--"]);
     cmd
 }
