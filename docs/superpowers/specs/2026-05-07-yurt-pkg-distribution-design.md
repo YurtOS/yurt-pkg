@@ -45,9 +45,12 @@ in-sandbox client. This spec adds:
   cannot be made by code running in the default sandbox.
 - The data model is federation-ready: any package's listing can later point
   at an externally-hosted artifact without changing the index format.
-- Installing or upgrading a package transitively installs or upgrades its
-  declared dependencies. Version collisions across the resolved set are
-  detected and reported before any filesystem mutation.
+- Installing a package transitively installs missing declared dependencies.
+  `pkg install` does not silently change already-installed package versions; if
+  a requested package would require such a change, it reports the conflict and
+  asks the user to run `pkg upgrade`. `pkg upgrade` owns version changes for
+  installed packages. Version collisions across the resolved set are detected
+  and reported before any filesystem mutation.
 
 ## Non-goals
 
@@ -316,11 +319,12 @@ Per package being installed:
      the cert's `notBefore`/`notAfter` window.
 4. Hand the archive to `yurt-pkg-format` for the existing per-file
    validation against `info/files.json`.
-5. Atomically apply to the install root and record in `installed.sqlite`.
-   The all-or-nothing contract is in scope (a failed transaction leaves
-   no partial state visible to subsequent commands); the *implementation
-   strategy* — staged copies, journaled rename, snapshot-and-swap, etc. —
-   is the resolver/installer spec's problem.
+5. Stage filesystem writes and commit installed package state in
+   `installed.sqlite` atomically. The v1 all-or-nothing contract is package
+   database visibility: failed or prepared transactions are not reported as
+   installed packages to subsequent commands. Filesystem writes are repairable
+   rather than whole-root-atomic until stronger image-generation or snapshot
+   support exists; the resolver/installer spec owns that recovery strategy.
 
 Yanked versions never appear in resolver results. An explicit
 `pkg install foo@1.0.1` of a yanked version fails with the
@@ -426,16 +430,25 @@ The user-visible contract for `pkg install` and `pkg upgrade`:
    transaction with a "version collision" error naming the conflicting
    constraints and which packages declared them. No filesystem
    mutation has happened yet.
-4. Otherwise, compute the diff against currently-installed versions
-   (installs, upgrades, downgrades, removals — though `pkg install`
-   never removes, only `remove`/`upgrade` may), present it as a plan,
-   and on confirmation fetch and verify every selected package (per
-   the install verification flow above) and apply atomically.
+4. Otherwise, compute the diff against currently-installed versions. For
+   `pkg install`, the diff may add missing packages but must not change an
+   already-installed package version/build. For `pkg upgrade`, the diff may
+   upgrade selected installed packages and their dependencies. Present the plan,
+   and on confirmation fetch and verify every selected package (per the install
+   verification flow above) and commit installed state atomically.
 
-`pkg install` of a package whose deps would force an upgrade of a
-shared library is allowed: that upgrade appears in the plan. A forced
-*downgrade* of an already-installed package is an error unless
-`--allow-downgrade` is given, matching the `pkg upgrade` rule.
+For v1, "atomically" means package database visibility is all-or-nothing:
+commands that read installed state do not observe prepared or failed package
+rows. Filesystem application is staged and repairable rather than
+whole-root-atomic. A crash after some files are copied may leave partial files
+in the sandbox root until the next mutating package command runs recovery, but
+those files are not reported as an installed package until recovery commits the
+transaction.
+
+`pkg install` of a package whose deps would force a shared library version
+change is rejected before downloads. The error names the installed version and
+the requirement that would force the change. The user-facing path for that
+change is `pkg upgrade <package>` or `pkg upgrade <shared-library>`.
 
 The constraint-solving strategy itself (backtracking order, preference
 between minor and patch upgrades, etc.) is the resolver spec's problem.
@@ -552,12 +565,14 @@ crate-based and fallback paths.
 | `pkg add-repo <url> --signing-subject <s> --signing-issuer <i> [--id <name>] [--priority <n>]` | `repo:write` capability — denied in default sandbox. Both subject and issuer are required; there is no default for either, and there is no interactive prompt. The added entry has the same shape as a `[[repo]]` block in `trusted-repos.toml`. |
 | `pkg trust ...` | `repo:write` capability. Subcommands for inspecting and (with capability) modifying the trust store; concrete subcommand surface deferred. |
 
-The all-or-nothing transaction *contract* (no partial state visible
-after a failed install/upgrade) is in scope and called out where
-relevant above. The *implementation strategy* for it (staged copies,
-journaled rename, snapshot-and-swap), along with resolver algorithm
-internals, install hooks, and conflict handling between files owned
-by different packages, is out of scope for this spec.
+The all-or-nothing transaction *contract* for v1 is package database
+visibility: no partial package state is visible to installed-state readers
+after a failed install/upgrade. Filesystem writes are staged and recoverable,
+but not whole-root-atomic until image-generation or snapshot support exists.
+The *implementation strategy* for stronger filesystem atomicity (journaled
+rename, snapshot-and-swap), along with resolver algorithm internals, install
+hooks, and conflict handling between files owned by different packages, is out
+of scope for this spec.
 
 ## Open questions
 
