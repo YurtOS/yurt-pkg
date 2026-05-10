@@ -208,6 +208,61 @@ fn check_transaction_collisions(
         for file in &archive.reader.files.files {
             match file.kind {
                 FileEntryKind::Dir => {
+                    // In-transaction reverse: an earlier archive in the
+                    // same plan placed a non-directory at this exact path.
+                    // The post-loop sweep below catches this too, but
+                    // failing inline gives the dir-side ownership info
+                    // when the error is raised.
+                    if non_directory_paths.contains(&file.path) {
+                        bail!(
+                            "{} {}-{} would replace non-directory path {} \
+                             with a directory in the same transaction",
+                            archive.package.name,
+                            archive.package.version,
+                            archive.package.build,
+                            file.path
+                        );
+                    }
+                    // Already-on-disk collision. Existing path that is
+                    // *also* a directory is fine (multiple packages
+                    // routinely claim ownership of /usr, /usr/lib, ...).
+                    // Existing path that is a non-directory is the bug
+                    // the reviewer flagged: prepare_install would write
+                    // its row, then write_entries would call
+                    // create_dir_all on a regular-file path and explode,
+                    // leaving the staging tree wedged.
+                    let destination = root.join(&file.path);
+                    if let Some(metadata) = symlink_metadata_opt(&destination)? {
+                        if !metadata.is_dir() {
+                            // Enrich the error with the owning package
+                            // when one is registered in the installed
+                            // store; fall back to "unmanaged" otherwise.
+                            // path_owner doesn't carry kind, but the
+                            // filesystem agrees with the committed-
+                            // installed state for any committed entry,
+                            // so the kind check above is sufficient.
+                            if let Some(owner) = store.path_owner(&file.path)? {
+                                bail!(
+                                    "{} {}-{} would replace path {} \
+                                     (currently a non-directory owned by {}) \
+                                     with a directory",
+                                    archive.package.name,
+                                    archive.package.version,
+                                    archive.package.build,
+                                    file.path,
+                                    owner
+                                );
+                            }
+                            bail!(
+                                "{} {}-{} would replace unmanaged \
+                                 non-directory path {} with a directory",
+                                archive.package.name,
+                                archive.package.version,
+                                archive.package.build,
+                                file.path
+                            );
+                        }
+                    }
                     directory_paths.insert(file.path.clone());
                 }
                 FileEntryKind::File | FileEntryKind::Symlink | FileEntryKind::Hardlink => {
@@ -324,9 +379,13 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
 }
 
 fn symlink_metadata_exists(path: &Path) -> Result<bool> {
+    Ok(symlink_metadata_opt(path)?.is_some())
+}
+
+fn symlink_metadata_opt(path: &Path) -> Result<Option<fs::Metadata>> {
     match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(anyhow!(err).context(format!("failed to inspect {}", path.display()))),
     }
 }
@@ -381,6 +440,120 @@ mod tests {
             b"hello\n"
         );
         assert_eq!(store.path_owner("bin/hello").unwrap().unwrap(), "hello");
+    }
+
+    #[test]
+    fn rejects_dir_over_installed_file() {
+        // Reverse of the existing collision case: package A is already
+        // installed and owns share/foo as a regular file; package B
+        // arrives in a fresh transaction with share/foo as a directory.
+        // Without the dir-arm guard, prepare_install would write its row
+        // and then write_entries would call create_dir_all on the on-disk
+        // file path, leaving the staging tree wedged.
+        std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
+        let state = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let archive_dir = tempdir().unwrap();
+        let store = InstalledStore::open(state.path()).unwrap();
+
+        // Phase 1: install package A with a file at share/foo.
+        let pkg_a = planned_package_with_archive(
+            &archive_dir,
+            "a",
+            "1.0.0",
+            "yurt_0",
+            archive_with_file("a", "1.0.0", "yurt_0", "share/foo", b"x"),
+        );
+        apply_plan(root.path(), state.path(), &store, &[pkg_a]).unwrap();
+        assert_eq!(store.path_owner("share/foo").unwrap().unwrap(), "a");
+
+        // Phase 2: try to install package B with a dir at share/foo.
+        let pkg_b = planned_package_with_archive(
+            &archive_dir,
+            "b",
+            "1.0.0",
+            "yurt_0",
+            archive_with_dir("b", "1.0.0", "yurt_0", "share/foo"),
+        );
+        let err = apply_plan(root.path(), state.path(), &store, &[pkg_b])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("would replace path share/foo")
+                && err.contains("owned by a"),
+            "unexpected error: {err}"
+        );
+        // Pre-prepare bail: nothing about pkg b should have been
+        // written into the installed store.
+        assert!(store.path_owner("share/foo").unwrap().as_deref() == Some("a"));
+    }
+
+    #[test]
+    fn rejects_dir_over_unmanaged_file() {
+        // Pre-existing on-disk file outside any package — e.g. a
+        // hand-edited config or a leftover from a non-yurt install.
+        // A package that ships a directory at the same path must
+        // refuse to proceed.
+        std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
+        let state = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let archive_dir = tempdir().unwrap();
+        let store = InstalledStore::open(state.path()).unwrap();
+
+        std::fs::create_dir_all(root.path().join("share")).unwrap();
+        std::fs::write(root.path().join("share/foo"), b"unmanaged").unwrap();
+
+        let pkg = planned_package_with_archive(
+            &archive_dir,
+            "b",
+            "1.0.0",
+            "yurt_0",
+            archive_with_dir("b", "1.0.0", "yurt_0", "share/foo"),
+        );
+        let err = apply_plan(root.path(), state.path(), &store, &[pkg])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unmanaged non-directory path share/foo"),
+            "unexpected error: {err}"
+        );
+        // The unmanaged file must be untouched.
+        assert_eq!(
+            std::fs::read(root.path().join("share/foo")).unwrap(),
+            b"unmanaged"
+        );
+    }
+
+    #[test]
+    fn allows_dir_over_existing_dir() {
+        // Multiple packages routinely claim ownership of the same
+        // directory (/usr, /usr/lib, /usr/share). A pre-existing
+        // directory at a path a new package's dir entry occupies is
+        // not a collision — only a non-directory there is.
+        std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
+        let state = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let archive_dir = tempdir().unwrap();
+        let store = InstalledStore::open(state.path()).unwrap();
+
+        let pkg_a = planned_package_with_archive(
+            &archive_dir,
+            "a",
+            "1.0.0",
+            "yurt_0",
+            archive_with_dir("a", "1.0.0", "yurt_0", "share/common"),
+        );
+        apply_plan(root.path(), state.path(), &store, &[pkg_a]).unwrap();
+
+        let pkg_b = planned_package_with_archive(
+            &archive_dir,
+            "b",
+            "1.0.0",
+            "yurt_0",
+            archive_with_dir("b", "1.0.0", "yurt_0", "share/common"),
+        );
+        // Should NOT bail — directories can co-occupy.
+        apply_plan(root.path(), state.path(), &store, &[pkg_b]).unwrap();
     }
 
     #[test]
