@@ -26,6 +26,7 @@ pub fn apply_plan(
         .map(load_archive)
         .collect::<Result<Vec<_>>>()?;
     check_transaction_collisions(root, store, &archives)?;
+    check_symlink_ancestors(root, &archives)?;
 
     let txid = transaction_id();
     let staging_root = state_root.join("staging").join(&txid).join("root");
@@ -298,6 +299,83 @@ fn check_transaction_collisions(
     Ok(())
 }
 
+/// Reject any plan whose entries would be written *through* a symlink.
+///
+/// The vulnerable shape: an archive ships `escape -> /tmp/out` plus
+/// `escape/pwned`. `fs::write(root.join("escape/pwned"))` follows the
+/// symlink during path traversal, so the file lands at /tmp/out/pwned,
+/// outside the install root. The same shape works across archives:
+/// package A installed earlier with a symlink at `escape`, package B in
+/// this transaction with a file at `escape/pwned`.
+///
+/// Block both forms before the staging write touches the filesystem.
+/// For each entry path, walk its strict ancestors and reject if any
+/// ancestor is:
+///
+///   1. A symlink path that *this* transaction is about to install
+///      (covers same-transaction across-archive cases).
+///   2. A symlink that already exists on disk under `root` (covers
+///      previously-installed-package and unmanaged-symlink cases).
+///
+/// Rejection is unambiguous — there's no legitimate yurt-pkg use case
+/// for installing a file through a managed symlink. Side-effect-free
+/// (no fs writes), so safe to run before prepare_install.
+fn check_symlink_ancestors(root: &Path, archives: &[LoadedArchive<'_>]) -> Result<()> {
+    let mut transaction_symlinks: BTreeSet<String> = BTreeSet::new();
+    for archive in archives {
+        for file in &archive.reader.files.files {
+            if matches!(file.kind, FileEntryKind::Symlink) {
+                transaction_symlinks.insert(file.path.clone());
+            }
+        }
+    }
+
+    for archive in archives {
+        for file in &archive.reader.files.files {
+            for ancestor in strict_ancestors(&file.path) {
+                if transaction_symlinks.contains(&ancestor) {
+                    bail!(
+                        "{} {}-{}: ancestor {} of {} is a symlink installed \
+                         in the same transaction; refusing to write through it",
+                        archive.package.name,
+                        archive.package.version,
+                        archive.package.build,
+                        ancestor,
+                        file.path
+                    );
+                }
+                let on_disk = root.join(&ancestor);
+                if let Some(metadata) = symlink_metadata_opt(&on_disk)? {
+                    if metadata.file_type().is_symlink() {
+                        bail!(
+                            "{} {}-{}: ancestor {} of {} is a symlink on disk; \
+                             refusing to write through it",
+                            archive.package.name,
+                            archive.package.version,
+                            archive.package.build,
+                            ancestor,
+                            file.path
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// All strict ancestors of `path` in walk order (shortest first).
+/// "Strict" excludes `path` itself. `"a/b/c"` -> `["a", "a/b"]`.
+fn strict_ancestors(path: &str) -> Vec<String> {
+    let parts: Vec<&str> = path.split('/').collect();
+    if parts.len() <= 1 {
+        return Vec::new();
+    }
+    (0..parts.len() - 1)
+        .map(|i| parts[..=i].join("/"))
+        .collect()
+}
+
 fn write_entries(root: &Path, reader: &Reader) -> Result<()> {
     for entry in &reader.entries {
         let path = root.join(&entry.path);
@@ -557,6 +635,171 @@ mod tests {
     }
 
     #[test]
+    fn rejects_file_under_symlink_same_archive() {
+        // Single archive ships `escape -> /tmp/out` plus `escape/pwned`.
+        // Without the ancestor check, write_entries follows the symlink
+        // during traversal and writes outside the install root.
+        std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
+        let state = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let archive_dir = tempdir().unwrap();
+        let store = InstalledStore::open(state.path()).unwrap();
+
+        let pkg = planned_package_with_archive(
+            &archive_dir,
+            "evil",
+            "1.0.0",
+            "yurt_0",
+            archive_with_symlink_and_file(
+                "evil",
+                "1.0.0",
+                "yurt_0",
+                "escape",
+                outside.path().to_str().unwrap(),
+                "escape/pwned",
+                b"escaped",
+            ),
+        );
+        let err = apply_plan(root.path(), state.path(), &store, &[pkg])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ancestor escape of escape/pwned is a symlink installed in the same transaction"),
+            "unexpected error: {err}"
+        );
+        // Outside dir must be untouched.
+        assert!(!outside.path().join("pwned").exists());
+        // Install root must have nothing — we bailed before staging.
+        assert!(!root.path().join("escape").exists());
+    }
+
+    #[test]
+    fn rejects_file_under_preinstalled_symlink() {
+        // Package A installs a symlink at `escape -> outside`. Package B
+        // arrives in a fresh transaction with a file at `escape/pwned`.
+        // The symlink is now on disk (committed by A); B's file would
+        // follow it without the ancestor check.
+        std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
+        let state = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let archive_dir = tempdir().unwrap();
+        let store = InstalledStore::open(state.path()).unwrap();
+
+        let pkg_a = planned_package_with_archive(
+            &archive_dir,
+            "a",
+            "1.0.0",
+            "yurt_0",
+            archive_with_symlink(
+                "a",
+                "1.0.0",
+                "yurt_0",
+                "escape",
+                outside.path().to_str().unwrap(),
+            ),
+        );
+        apply_plan(root.path(), state.path(), &store, &[pkg_a]).unwrap();
+        // Sanity: a's symlink is on disk now.
+        assert!(std::fs::symlink_metadata(root.path().join("escape"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        let pkg_b = planned_package_with_archive(
+            &archive_dir,
+            "b",
+            "1.0.0",
+            "yurt_0",
+            archive_with_file("b", "1.0.0", "yurt_0", "escape/pwned", b"escaped"),
+        );
+        let err = apply_plan(root.path(), state.path(), &store, &[pkg_b])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ancestor escape of escape/pwned is a symlink on disk"),
+            "unexpected error: {err}"
+        );
+        assert!(!outside.path().join("pwned").exists());
+    }
+
+    #[test]
+    fn rejects_file_under_unmanaged_symlink() {
+        // Same shape as the preinstalled-symlink case but the symlink
+        // is hand-planted (e.g. left by a non-yurt install, or an
+        // operator). Same code path; pinned separately so the
+        // unmanaged case can't regress without us noticing.
+        std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
+        let state = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let archive_dir = tempdir().unwrap();
+        let store = InstalledStore::open(state.path()).unwrap();
+
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+
+        let pkg = planned_package_with_archive(
+            &archive_dir,
+            "b",
+            "1.0.0",
+            "yurt_0",
+            archive_with_file("b", "1.0.0", "yurt_0", "escape/pwned", b"x"),
+        );
+        let err = apply_plan(root.path(), state.path(), &store, &[pkg])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("symlink on disk"),
+            "unexpected error: {err}"
+        );
+        assert!(!outside.path().join("pwned").exists());
+    }
+
+    #[test]
+    fn allows_file_under_real_directory() {
+        // Regression guard: legitimate `share/sub/file.txt` where `sub`
+        // is a real directory (not a symlink) must still install.
+        std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
+        let state = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let archive_dir = tempdir().unwrap();
+        let store = InstalledStore::open(state.path()).unwrap();
+
+        let mut writer = Writer::new(index("ok", "1.0.0", "yurt_0", &[]), None).unwrap();
+        writer.add_dir("share", 0o755, 0, 0).unwrap();
+        writer.add_dir("share/sub", 0o755, 0, 0).unwrap();
+        writer
+            .add_file("share/sub/file.txt", b"ok".to_vec(), 0o644, 0, 0)
+            .unwrap();
+        let pkg = planned_package_with_archive(
+            &archive_dir,
+            "ok",
+            "1.0.0",
+            "yurt_0",
+            finish(writer),
+        );
+        apply_plan(root.path(), state.path(), &store, &[pkg]).unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("share/sub/file.txt")).unwrap(),
+            b"ok"
+        );
+    }
+
+    #[test]
+    fn strict_ancestors_walks_components() {
+        // Pin the helper. Splitting on '/' is delicate enough to want
+        // a few canonical cases written down.
+        assert_eq!(strict_ancestors("a"), Vec::<String>::new());
+        assert_eq!(strict_ancestors("a/b"), vec!["a".to_string()]);
+        assert_eq!(
+            strict_ancestors("a/b/c"),
+            vec!["a".to_string(), "a/b".to_string()]
+        );
+        assert_eq!(strict_ancestors(""), Vec::<String>::new());
+    }
+
+    #[test]
     fn rejects_file_directory_collision() {
         std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
         let state = tempdir().unwrap();
@@ -604,6 +847,35 @@ mod tests {
     fn archive_with_dir(name: &str, version: &str, build: &str, path: &str) -> Vec<u8> {
         let mut writer = Writer::new(index(name, version, build, &[]), None).unwrap();
         writer.add_dir(path, 0o755, 0, 0).unwrap();
+        finish(writer)
+    }
+
+    fn archive_with_symlink(
+        name: &str,
+        version: &str,
+        build: &str,
+        link: &str,
+        target: &str,
+    ) -> Vec<u8> {
+        let mut writer = Writer::new(index(name, version, build, &[]), None).unwrap();
+        writer.add_symlink(link, target, 0o777, 0, 0).unwrap();
+        finish(writer)
+    }
+
+    fn archive_with_symlink_and_file(
+        name: &str,
+        version: &str,
+        build: &str,
+        link: &str,
+        target: &str,
+        file_path: &str,
+        content: &[u8],
+    ) -> Vec<u8> {
+        let mut writer = Writer::new(index(name, version, build, &[]), None).unwrap();
+        writer.add_symlink(link, target, 0o777, 0, 0).unwrap();
+        writer
+            .add_file(file_path, content.to_vec(), 0o644, 0, 0)
+            .unwrap();
         finish(writer)
     }
 
