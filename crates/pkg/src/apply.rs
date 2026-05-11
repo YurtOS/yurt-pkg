@@ -309,8 +309,8 @@ fn check_transaction_collisions(
 /// this transaction with a file at `escape/pwned`.
 ///
 /// Block both forms before the staging write touches the filesystem.
-/// For each entry path, walk its strict ancestors and reject if any
-/// ancestor is:
+/// For each entry path, and for each hardlink target, walk strict
+/// ancestors and reject if any ancestor is:
 ///
 ///   1. A symlink path that *this* transaction is about to install
 ///      (covers same-transaction across-archive cases).
@@ -337,29 +337,60 @@ fn check_symlink_ancestors(root: &Path, archives: &[LoadedArchive<'_>]) -> Resul
 
     for archive in archives {
         for file in &archive.reader.files.files {
-            for ancestor in strict_ancestors(&file.path) {
-                let reason = if transaction_symlinks.contains(ancestor) {
-                    Some("installed in the same transaction")
-                } else if symlink_metadata_opt(&root.join(ancestor))?
-                    .is_some_and(|m| m.file_type().is_symlink())
-                {
-                    Some("on disk")
-                } else {
-                    None
-                };
-                if let Some(where_) = reason {
-                    bail!(
-                        "{} {}-{}: ancestor {} of {} is a symlink {}; \
-                         refusing to write through it",
-                        archive.package.name,
-                        archive.package.version,
-                        archive.package.build,
-                        ancestor,
-                        file.path,
-                        where_
-                    );
-                }
+            check_symlink_ancestors_for_path(
+                root,
+                &transaction_symlinks,
+                &file.path,
+                &file.path,
+                archive,
+            )?;
+            if matches!(file.kind, FileEntryKind::Hardlink) {
+                let target = file
+                    .target
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("hardlink {} missing target", file.path))?;
+                let subject = format!("hardlink target {target}");
+                check_symlink_ancestors_for_path(
+                    root,
+                    &transaction_symlinks,
+                    target,
+                    &subject,
+                    archive,
+                )?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn check_symlink_ancestors_for_path(
+    root: &Path,
+    transaction_symlinks: &HashSet<&str>,
+    path: &str,
+    subject: &str,
+    archive: &LoadedArchive<'_>,
+) -> Result<()> {
+    for ancestor in strict_ancestors(path) {
+        let reason = if transaction_symlinks.contains(ancestor) {
+            Some("installed in the same transaction")
+        } else if symlink_metadata_opt(&root.join(ancestor))?
+            .is_some_and(|m| m.file_type().is_symlink())
+        {
+            Some("on disk")
+        } else {
+            None
+        };
+        if let Some(where_) = reason {
+            bail!(
+                "{} {}-{}: ancestor {} of {} is a symlink {}; \
+                 refusing to write through it",
+                archive.package.name,
+                archive.package.version,
+                archive.package.build,
+                ancestor,
+                subject,
+                where_
+            );
         }
     }
     Ok(())
@@ -794,6 +825,68 @@ mod tests {
         );
         assert!(!outside.path().join("d").exists());
         assert!(!root.path().join("a").exists());
+    }
+
+    #[test]
+    fn rejects_hardlink_target_under_symlink_same_archive() {
+        std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
+        let state = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let archive_dir = tempdir().unwrap();
+        let store = InstalledStore::open(state.path()).unwrap();
+        std::fs::write(outside.path().join("victim"), b"outside").unwrap();
+
+        let mut writer = Writer::new(index("evil", "1.0.0", "yurt_0", &[]), None).unwrap();
+        writer
+            .add_symlink("escape", outside.path().to_str().unwrap(), 0o777, 0, 0)
+            .unwrap();
+        writer
+            .add_hardlink("copy", "escape/victim", 0o644, 0, 0)
+            .unwrap();
+        let pkg =
+            planned_package_with_archive(&archive_dir, "evil", "1.0.0", "yurt_0", finish(writer));
+
+        let err = apply_plan(root.path(), state.path(), &store, &[pkg])
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains(
+                "ancestor escape of hardlink target escape/victim is a symlink installed in the same transaction"
+            ),
+            "unexpected error: {err}"
+        );
+        assert!(!root.path().join("copy").exists());
+    }
+
+    #[test]
+    fn rejects_hardlink_target_under_unmanaged_symlink() {
+        std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
+        let state = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let archive_dir = tempdir().unwrap();
+        let store = InstalledStore::open(state.path()).unwrap();
+        std::fs::write(outside.path().join("victim"), b"outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("escape")).unwrap();
+
+        let mut writer = Writer::new(index("evil", "1.0.0", "yurt_0", &[]), None).unwrap();
+        writer
+            .add_hardlink("copy", "escape/victim", 0o644, 0, 0)
+            .unwrap();
+        let pkg =
+            planned_package_with_archive(&archive_dir, "evil", "1.0.0", "yurt_0", finish(writer));
+
+        let err = apply_plan(root.path(), state.path(), &store, &[pkg])
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("ancestor escape of hardlink target escape/victim is a symlink on disk"),
+            "unexpected error: {err}"
+        );
+        assert!(!root.path().join("copy").exists());
     }
 
     #[test]

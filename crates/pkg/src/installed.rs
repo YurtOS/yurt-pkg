@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
@@ -388,10 +388,25 @@ impl InstalledStore {
         let rows = stmt
             .query_map([txid], |row| row.get::<_, String>(0))
             .context("failed to query prepared package manifests")?;
+        let mut manifests = Vec::new();
         for row in rows {
             let files_json = row.context("failed to read prepared package manifest row")?;
             let manifest: FilesManifest =
                 serde_json::from_str(&files_json).context("failed to parse prepared files_json")?;
+            manifests.push(manifest);
+        }
+        let transaction_symlinks: HashSet<String> = manifests
+            .iter()
+            .flat_map(|m| m.files.iter())
+            .filter(|f| matches!(f.kind, FileEntryKind::Symlink))
+            .map(|f| f.path.clone())
+            .collect();
+        for manifest in &manifests {
+            for file in &manifest.files {
+                check_recovery_symlink_ancestors(file, &transaction_symlinks, sandbox_root)?;
+            }
+        }
+        for manifest in manifests {
             for file in manifest.files {
                 copy_staged_file(&file, staging_root, sandbox_root)?;
             }
@@ -600,6 +615,73 @@ fn copy_staged_file(file: &FileEntry, staging_root: &Path, sandbox_root: &Path) 
     Ok(())
 }
 
+fn check_recovery_symlink_ancestors(
+    file: &FileEntry,
+    transaction_symlinks: &HashSet<String>,
+    sandbox_root: &Path,
+) -> Result<()> {
+    check_recovery_symlink_ancestors_for_path(
+        &file.path,
+        &file.path,
+        transaction_symlinks,
+        sandbox_root,
+    )?;
+    if matches!(file.kind, FileEntryKind::Hardlink) {
+        let target = file
+            .target
+            .as_deref()
+            .ok_or_else(|| anyhow!("hardlink {} missing target", file.path))?;
+        let subject = format!("hardlink target {target}");
+        check_recovery_symlink_ancestors_for_path(
+            target,
+            &subject,
+            transaction_symlinks,
+            sandbox_root,
+        )?;
+    }
+    Ok(())
+}
+
+fn check_recovery_symlink_ancestors_for_path(
+    path: &str,
+    subject: &str,
+    transaction_symlinks: &HashSet<String>,
+    sandbox_root: &Path,
+) -> Result<()> {
+    for ancestor in strict_ancestors(path) {
+        let reason = if transaction_symlinks.contains(ancestor) {
+            Some("in prepared transaction")
+        } else if symlink_metadata_opt(&sandbox_root.join(ancestor))?
+            .is_some_and(|m| m.file_type().is_symlink())
+        {
+            Some("on disk")
+        } else {
+            None
+        };
+        if let Some(where_) = reason {
+            anyhow::bail!(
+                "ancestor {} of {} is a symlink {}; refusing to write through it",
+                ancestor,
+                subject,
+                where_
+            );
+        }
+    }
+    Ok(())
+}
+
+fn strict_ancestors(path: &str) -> impl Iterator<Item = &str> {
+    path.match_indices('/').map(move |(i, _)| &path[..i])
+}
+
+fn symlink_metadata_opt(path: &Path) -> Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(anyhow!(err).context(format!("failed to inspect {}", path.display()))),
+    }
+}
+
 fn ensure_parent(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -687,6 +769,63 @@ mod tests {
         assert_eq!(std::fs::read(root.path().join("bin/foo")).unwrap(), b"x");
         assert_eq!(store.list_installed().unwrap()[0].name, "foo");
         assert_eq!(store.path_owner("bin/foo").unwrap().unwrap(), "foo");
+    }
+
+    #[test]
+    fn recovery_rejects_hardlink_target_under_prepared_symlink() {
+        let state = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let store = InstalledStore::open(state.path()).unwrap();
+        let txid = "tx1";
+        std::fs::write(outside.path().join("victim"), b"outside").unwrap();
+        let staged_root = state.path().join("staging/tx1/root");
+        std::fs::create_dir_all(&staged_root).unwrap();
+        std::os::unix::fs::symlink(outside.path(), staged_root.join("escape")).unwrap();
+        let files = vec![
+            FileEntry {
+                path: "escape".into(),
+                kind: FileEntryKind::Symlink,
+                sha256: None,
+                size: None,
+                target: Some(outside.path().to_str().unwrap().into()),
+                mode: "0777".into(),
+                uid: 0,
+                gid: 0,
+            },
+            FileEntry {
+                path: "copy".into(),
+                kind: FileEntryKind::Hardlink,
+                sha256: None,
+                size: None,
+                target: Some("escape/victim".into()),
+                mode: "0644".into(),
+                uid: 0,
+                gid: 0,
+            },
+        ];
+        let package = InstalledPackageInput::new_for_test(
+            "foo",
+            "1.0.0",
+            "yurt_0",
+            files,
+            Vec::<Depends>::new(),
+        );
+        store.prepare_install(txid, &[package]).unwrap();
+
+        let err = store
+            .recover_prepared_transactions(root.path())
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains(
+                "ancestor escape of hardlink target escape/victim is a symlink in prepared transaction"
+            ),
+            "unexpected error: {err}"
+        );
+        assert!(!root.path().join("escape").exists());
+        assert!(!root.path().join("copy").exists());
     }
 
     #[test]
