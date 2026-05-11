@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ffi::CString;
 use std::fs;
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::raw::{c_char, c_int};
+use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -483,8 +485,25 @@ fn remove_existing_link_path(path: &Path) -> Result<()> {
 }
 
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777))
-        .with_context(|| format!("failed to chmod {}", path.display()))
+    chmod_path(path, mode & 0o7777).with_context(|| format!("failed to chmod {}", path.display()))
+}
+
+fn chmod_path(path: &Path, mode: u32) -> Result<()> {
+    let path = CString::new(
+        path.to_str()
+            .with_context(|| format!("non-UTF-8 path {}", path.display()))?,
+    )
+    .with_context(|| format!("path contains interior NUL: {}", path.display()))?;
+    let rc = unsafe { chmod(path.as_ptr(), mode as c_int) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error()).context("chmod failed")
+    }
+}
+
+unsafe extern "C" {
+    fn chmod(path: *const c_char, mode: c_int) -> c_int;
 }
 
 fn symlink_metadata_exists(path: &Path) -> Result<bool> {
