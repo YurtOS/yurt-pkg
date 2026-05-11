@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::path::Path;
@@ -320,43 +320,44 @@ fn check_transaction_collisions(
 /// Rejection is unambiguous — there's no legitimate yurt-pkg use case
 /// for installing a file through a managed symlink. Side-effect-free
 /// (no fs writes), so safe to run before prepare_install.
+///
+/// Path-normalization invariant: this check relies on every entry path
+/// being already normalized to forward-slash with no `.`, `..`, leading
+/// `/`, or empty components. `yurt_pkg_format::path::validate_entry_path`
+/// enforces that at archive read and write time, so split-on-`/`
+/// produces canonical ancestors here. If that invariant is ever
+/// loosened, this function must normalize explicitly.
 fn check_symlink_ancestors(root: &Path, archives: &[LoadedArchive<'_>]) -> Result<()> {
-    let mut transaction_symlinks: BTreeSet<String> = BTreeSet::new();
-    for archive in archives {
-        for file in &archive.reader.files.files {
-            if matches!(file.kind, FileEntryKind::Symlink) {
-                transaction_symlinks.insert(file.path.clone());
-            }
-        }
-    }
+    let transaction_symlinks: HashSet<&str> = archives
+        .iter()
+        .flat_map(|a| a.reader.files.files.iter())
+        .filter(|f| matches!(f.kind, FileEntryKind::Symlink))
+        .map(|f| f.path.as_str())
+        .collect();
 
     for archive in archives {
         for file in &archive.reader.files.files {
             for ancestor in strict_ancestors(&file.path) {
-                if transaction_symlinks.contains(&ancestor) {
+                let reason = if transaction_symlinks.contains(ancestor) {
+                    Some("installed in the same transaction")
+                } else if symlink_metadata_opt(&root.join(ancestor))?
+                    .is_some_and(|m| m.file_type().is_symlink())
+                {
+                    Some("on disk")
+                } else {
+                    None
+                };
+                if let Some(where_) = reason {
                     bail!(
-                        "{} {}-{}: ancestor {} of {} is a symlink installed \
-                         in the same transaction; refusing to write through it",
+                        "{} {}-{}: ancestor {} of {} is a symlink {}; \
+                         refusing to write through it",
                         archive.package.name,
                         archive.package.version,
                         archive.package.build,
                         ancestor,
-                        file.path
+                        file.path,
+                        where_
                     );
-                }
-                let on_disk = root.join(&ancestor);
-                if let Some(metadata) = symlink_metadata_opt(&on_disk)? {
-                    if metadata.file_type().is_symlink() {
-                        bail!(
-                            "{} {}-{}: ancestor {} of {} is a symlink on disk; \
-                             refusing to write through it",
-                            archive.package.name,
-                            archive.package.version,
-                            archive.package.build,
-                            ancestor,
-                            file.path
-                        );
-                    }
                 }
             }
         }
@@ -364,16 +365,15 @@ fn check_symlink_ancestors(root: &Path, archives: &[LoadedArchive<'_>]) -> Resul
     Ok(())
 }
 
-/// All strict ancestors of `path` in walk order (shortest first).
-/// "Strict" excludes `path` itself. `"a/b/c"` -> `["a", "a/b"]`.
-fn strict_ancestors(path: &str) -> Vec<String> {
-    let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() <= 1 {
-        return Vec::new();
-    }
-    (0..parts.len() - 1)
-        .map(|i| parts[..=i].join("/"))
-        .collect()
+/// Iterator over strict ancestors of `path` in walk order (shortest
+/// first). "Strict" excludes `path` itself. `"a/b/c"` yields
+/// `"a"`, `"a/b"`. Empty / single-component inputs yield nothing.
+///
+/// Operates on raw byte indices into `path` — see the
+/// path-normalization invariant on `check_symlink_ancestors` for why
+/// splitting on `/` is sufficient.
+fn strict_ancestors(path: &str) -> impl Iterator<Item = &str> {
+    path.match_indices('/').map(move |(i, _)| &path[..i])
 }
 
 fn write_entries(root: &Path, reader: &Reader) -> Result<()> {
@@ -557,8 +557,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("would replace path share/foo")
-                && err.contains("owned by a"),
+            err.contains("would replace path share/foo") && err.contains("owned by a"),
             "unexpected error: {err}"
         );
         // Pre-prepare bail: nothing about pkg b should have been
@@ -665,7 +664,9 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("ancestor escape of escape/pwned is a symlink installed in the same transaction"),
+            err.contains(
+                "ancestor escape of escape/pwned is a symlink installed in the same transaction"
+            ),
             "unexpected error: {err}"
         );
         // Outside dir must be untouched.
@@ -749,11 +750,50 @@ mod tests {
         let err = apply_plan(root.path(), state.path(), &store, &[pkg])
             .unwrap_err()
             .to_string();
+        assert!(err.contains("symlink on disk"), "unexpected error: {err}");
+        assert!(!outside.path().join("pwned").exists());
+    }
+
+    #[test]
+    fn rejects_file_under_deep_ancestor_symlink() {
+        // The symlink lives several components deep:
+        // `a/b/c -> outside`, then a sibling archive ships
+        // `a/b/c/d/pwned`. The check must walk all strict ancestors,
+        // not just the top-level one.
+        std::env::set_var("YURT_PKG_TEST_STATIC_ARCHIVE_VERIFIER", "1");
+        let state = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let archive_dir = tempdir().unwrap();
+        let store = InstalledStore::open(state.path()).unwrap();
+
+        let mut writer_a = Writer::new(index("a", "1.0.0", "yurt_0", &[]), None).unwrap();
+        writer_a.add_dir("a", 0o755, 0, 0).unwrap();
+        writer_a.add_dir("a/b", 0o755, 0, 0).unwrap();
+        writer_a
+            .add_symlink("a/b/c", outside.path().to_str().unwrap(), 0o777, 0, 0)
+            .unwrap();
+        let pkg_a =
+            planned_package_with_archive(&archive_dir, "a", "1.0.0", "yurt_0", finish(writer_a));
+
+        let pkg_b = planned_package_with_archive(
+            &archive_dir,
+            "b",
+            "1.0.0",
+            "yurt_0",
+            archive_with_file("b", "1.0.0", "yurt_0", "a/b/c/d/pwned", b"escaped"),
+        );
+        let err = apply_plan(root.path(), state.path(), &store, &[pkg_a, pkg_b])
+            .unwrap_err()
+            .to_string();
         assert!(
-            err.contains("symlink on disk"),
+            err.contains(
+                "ancestor a/b/c of a/b/c/d/pwned is a symlink installed in the same transaction"
+            ),
             "unexpected error: {err}"
         );
-        assert!(!outside.path().join("pwned").exists());
+        assert!(!outside.path().join("d").exists());
+        assert!(!root.path().join("a").exists());
     }
 
     #[test]
@@ -772,13 +812,8 @@ mod tests {
         writer
             .add_file("share/sub/file.txt", b"ok".to_vec(), 0o644, 0, 0)
             .unwrap();
-        let pkg = planned_package_with_archive(
-            &archive_dir,
-            "ok",
-            "1.0.0",
-            "yurt_0",
-            finish(writer),
-        );
+        let pkg =
+            planned_package_with_archive(&archive_dir, "ok", "1.0.0", "yurt_0", finish(writer));
         apply_plan(root.path(), state.path(), &store, &[pkg]).unwrap();
         assert_eq!(
             std::fs::read(root.path().join("share/sub/file.txt")).unwrap(),
@@ -790,13 +825,14 @@ mod tests {
     fn strict_ancestors_walks_components() {
         // Pin the helper. Splitting on '/' is delicate enough to want
         // a few canonical cases written down.
-        assert_eq!(strict_ancestors("a"), Vec::<String>::new());
-        assert_eq!(strict_ancestors("a/b"), vec!["a".to_string()]);
-        assert_eq!(
-            strict_ancestors("a/b/c"),
-            vec!["a".to_string(), "a/b".to_string()]
-        );
-        assert_eq!(strict_ancestors(""), Vec::<String>::new());
+        fn collect(p: &str) -> Vec<&str> {
+            strict_ancestors(p).collect()
+        }
+        assert_eq!(collect("a"), Vec::<&str>::new());
+        assert_eq!(collect("a/b"), vec!["a"]);
+        assert_eq!(collect("a/b/c"), vec!["a", "a/b"]);
+        assert_eq!(collect("a/b/c/d"), vec!["a", "a/b", "a/b/c"]);
+        assert_eq!(collect(""), Vec::<&str>::new());
     }
 
     #[test]
