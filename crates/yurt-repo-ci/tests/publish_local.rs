@@ -50,7 +50,8 @@ libc = "^0.1"
         .join("yurt-greet")
         .join("0.1.0")
         .join("yurt-greet-0.1.0-yurt_0.yurtpkg");
-    assert_eq!(fs::read(copied).unwrap(), b"fake package bytes");
+    assert_eq!(fs::read(&copied).unwrap(), b"fake package bytes");
+    assert!(copied.with_extension("yurtpkg.bundle").is_file());
     assert!(repo.join("index.json.bundle").is_file());
 
     let index: Index = serde_json::from_slice(&fs::read(repo.join("index.json")).unwrap()).unwrap();

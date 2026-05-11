@@ -191,6 +191,16 @@ fn publish_local(
     }
     fs::write(&artifact_dst, &artifact_bytes)
         .with_context(|| format!("writing {}", artifact_dst.display()))?;
+    fs::write(
+        artifact_dst.with_extension("yurtpkg.bundle"),
+        b"local test fixture bundle\n",
+    )
+    .with_context(|| {
+        format!(
+            "writing {}",
+            artifact_dst.with_extension("yurtpkg.bundle").display()
+        )
+    })?;
 
     let version = PackageVersion {
         name: None,
