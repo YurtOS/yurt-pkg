@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_recovery_removes_prepared_children() {
+    fn failed_recovery_removes_prepared_children_when_staging_is_missing() {
         let temp = tempdir().unwrap();
         let store = InstalledStore::open(temp.path()).unwrap();
         store.record_prepared_for_test("tx1", "foo").unwrap();
@@ -202,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_package_is_listed_and_owns_non_directory_paths() {
+    fn prepared_package_is_hidden_until_commit_and_then_owns_non_directory_paths() {
         let temp = tempdir().unwrap();
         let store = InstalledStore::open(temp.path()).unwrap();
         let files = vec![
@@ -235,7 +235,12 @@ mod tests {
             Vec::<Depends>::new(),
         );
 
-        store.commit_installed("tx1", &[package]).unwrap();
+        store.prepare_install("tx1", &[package]).unwrap();
+
+        assert!(store.list_installed().unwrap().is_empty());
+        assert!(store.path_owner("usr/bin/foo").unwrap().is_none());
+
+        store.commit_prepared_install("tx1").unwrap();
 
         assert_eq!(store.list_installed().unwrap()[0].name, "foo");
         assert!(store.path_owner("usr").unwrap().is_none());
@@ -275,7 +280,8 @@ impl InstalledStore {
     pub fn list_installed(&self) -> Result<Vec<InstalledPackage>>;
     pub fn installed_packages(&self) -> Result<BTreeMap<String, InstalledPackage>>;
     pub fn path_owner(&self, path: &str) -> Result<Option<String>>;
-    pub fn commit_installed(&self, txid: &str, packages: &[InstalledPackageInput]) -> Result<()>;
+    pub fn prepare_install(&self, txid: &str, packages: &[InstalledPackageInput]) -> Result<()>;
+    pub fn commit_prepared_install(&self, txid: &str) -> Result<()>;
 }
 ```
 
@@ -291,7 +297,11 @@ CREATE INDEX IF NOT EXISTS packages_install_transaction_idx ON packages(install_
 CREATE INDEX IF NOT EXISTS files_install_transaction_idx ON files(install_transaction_id);
 ```
 
-In `recover_prepared_transactions`, implement the conservative v1 behavior: for every `transactions.state = 'prepared'`, delete that transaction's rows from `files`, `dependencies`, and `packages`, then set the transaction row to `failed` with an error in one SQLite transaction. The apply module will later complete valid staged transactions before opening new work.
+In `prepare_install`, insert the prepared `transactions`, `packages`, `dependencies`, and `files` rows in one SQLite transaction. `pkg list`, `installed_packages`, and `path_owner` must ignore `install_state = 'prepared'` rows during normal queries so a prepared transaction reserves paths only for recovery and the active apply flow, not for user-visible installed state.
+
+In `commit_prepared_install`, set package rows for the transaction to `install_state = 'installed'` and the transaction row to `state = 'committed'` in one SQLite transaction.
+
+In `recover_prepared_transactions`, complete or fail every `transactions.state = 'prepared'` install before new work starts. If the transaction's staging tree is valid, copy staged entries into `sandbox_root` idempotently, then call `commit_prepared_install`. If staging is missing or corrupt, delete that transaction's rows from `files`, `dependencies`, and `packages`, then set the transaction row to `failed` with an error in one SQLite transaction. Prepared rows must never be silently discarded after files may have been copied into `sandbox_root`.
 
 - [ ] **Step 4: Run installed-state tests and verify GREEN**
 
@@ -524,8 +534,11 @@ Core behavior:
 - build all directory paths from every archive `files_json`;
 - reject file/symlink/hardlink collisions with installed `files`, in-transaction `files`, and installed or in-transaction directory paths;
 - stage entries under `<state_root>/staging/<txid>/root`;
+- call `store.prepare_install(txid, packages)` before mutating `root`, so a crash after this point has recoverable ownership state;
 - copy staged entries into `root`;
-- commit installed rows after successful copy.
+- call `store.commit_prepared_install(txid)` after successful copy.
+
+The apply order must match the spec's database-first recovery model. A failure before `prepare_install` leaves only staging data and no visible installed state; a failure after `prepare_install` leaves a prepared transaction that recovery can either complete from staging or fail and remove from the ownership tables. Do not copy into `root` before the prepared transaction, package, dependency, and file rows have been recorded.
 
 Use `std::os::unix::fs::symlink` and `std::fs::hard_link` for links. Set permissions with `std::fs::set_permissions` using `PermissionsExt::from_mode`.
 
